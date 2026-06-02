@@ -33,8 +33,8 @@ FEEDS = [
     "https://www.straitstimes.com/news/singapore/rss.xml",                    # ST Singapore
 ]
 
-# How many new items to include in one digest (keeps posts readable).
-MAX_ITEMS_PER_RUN = 12
+# How many new items to post each run. Set to 1 for just the top headline.
+MAX_ITEMS_PER_RUN = 1
 
 # OpenAI model - GPT-4.1 Mini is cheap and good at summarising.
 MODEL = "gpt-4.1-mini"
