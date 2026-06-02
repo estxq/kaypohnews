@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Kaypoh News bot - v1
---------------------
-Pulls Singapore news from RSS feeds, asks Claude to summarise and sort
-them into Finance / General, then posts a tidy digest to a Telegram channel.
+Kaypoh News bot
+---------------
+Each run posts one Finance story (from Business Times) and one General story
+(from CNA / Straits Times) to a Telegram channel, each summarised by OpenAI.
 
 Secrets are read from environment variables (set these as GitHub Secrets
 when you deploy, never hard-code them):
@@ -26,15 +26,17 @@ from openai import OpenAI
 # 1. CONFIG  -  this is the only part you normally edit
 # ----------------------------------------------------------------------
 
-# Your news sources. Add/remove RSS feed URLs freely.
-FEEDS = [
-    "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",  # CNA top
-    "https://www.businesstimes.com.sg/rss/top-stories",                       # Business Times
-    "https://www.straitstimes.com/news/singapore/rss.xml",                    # ST Singapore
+# FINANCE sources - markets, investing, banking, insurance, personal finance.
+# Business Times is Singapore's financial newspaper, so it's a clean fit.
+FINANCE_FEEDS = [
+    "https://www.businesstimes.com.sg/rss/top-stories",   # Business Times
 ]
 
-# How many new items to post each run. Set to 1 for just the top headline.
-MAX_ITEMS_PER_RUN = 1
+# GENERAL sources - everyday Singapore + world news.
+GENERAL_FEEDS = [
+    "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",  # CNA top
+    "https://www.straitstimes.com/news/singapore/rss.xml",                    # ST Singapore
+]
 
 # OpenAI model - GPT-4.1 Mini is cheap and good at summarising.
 MODEL = "gpt-4.1-mini"
@@ -67,80 +69,61 @@ def save_seen(seen):
 # 3. PULL NEW ARTICLES FROM RSS
 # ----------------------------------------------------------------------
 
-def fetch_new_articles(seen):
-    new = []
-    for url in FEEDS:
+def fetch_top_new(feeds, seen):
+    """Return the first article (from the given feeds) we haven't posted yet,
+    or None if there's nothing new."""
+    for url in feeds:
         feed = feedparser.parse(url)
         for entry in feed.entries:
             link = entry.get("link")
             if not link or link in seen:
                 continue
-            new.append({
+            return {
                 "title": entry.get("title", "").strip(),
                 "summary": entry.get("summary", "").strip()[:400],
                 "link": link,
-            })
-    # Newest sources first, capped so digests stay readable.
-    return new[:MAX_ITEMS_PER_RUN]
+            }
+    return None
 
 # ----------------------------------------------------------------------
 # 4. ASK CLAUDE TO SUMMARISE + CLASSIFY
 # ----------------------------------------------------------------------
 
-def summarise_with_ai(articles):
+def summarise_one(article, category):
+    """Write a one-sentence summary for a single article.
+    category is 'finance' or 'general' and shapes the angle."""
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # We hand the model the raw list and ask for clean JSON back.
-    article_blob = json.dumps(articles, ensure_ascii=False, indent=2)
+    if category == "finance":
+        lens = ("Summarise from a finance angle - markets/investing, banking and "
+                "interest rates, insurance, or personal finance (savings, loans, CPF). "
+                "Focus on the money/investment implication.")
+    else:
+        lens = "Summarise the key point in plain English for a general reader."
 
     prompt = f"""You are the editor of "Kaypoh News", a Singapore news digest.
 
-Here are new articles as JSON (title, summary, link):
+Article title: {article['title']}
+Article blurb: {article['summary']}
 
-{article_blob}
-
-For each article, write a ONE-sentence plain-English summary and decide if it
-is "finance" or "general". Where you spot a plausible knock-on effect between
-stories (e.g. fuel prices rising -> ride-hailing fares up), mention it briefly
-in the summary, but only if the articles genuinely support it.
-
-Respond with ONLY valid JSON in this exact shape:
-{{
-  "finance": [{{"summary": "...", "link": "..."}}],
-  "general": [{{"summary": "...", "link": "..."}}]
-}}"""
+Write ONE clear sentence summarising this story. {lens}
+Respond with ONLY valid JSON: {{"summary": "..."}}"""
 
     response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},  # forces valid JSON back
+        response_format={"type": "json_object"},
     )
-
-    text = response.choices[0].message.content
-    return json.loads(text)
+    data = json.loads(response.choices[0].message.content)
+    return data["summary"]
 
 # ----------------------------------------------------------------------
 # 5. POST TO TELEGRAM
 # ----------------------------------------------------------------------
 
-def build_messages(digest):
-    """Return a LIST of (text, url) tuples - one per article.
-
-    The url is passed separately so Telegram builds a big photo preview
-    card for it (like a proper news post)."""
-    messages = []
-
-    for item in digest.get("finance", []):
-        s = html.escape(item["summary"])
-        text = f'💰 <b>Finance</b>\n{s}'
-        messages.append((text, item["link"]))
-
-    for item in digest.get("general", []):
-        s = html.escape(item["summary"])
-        text = f'📰 <b>General</b>\n{s}'
-        messages.append((text, item["link"]))
-
-    return messages
+def format_post(category, summary):
+    label = "💰 <b>Finance</b>" if category == "finance" else "📰 <b>General</b>"
+    return f'{label}\n{html.escape(summary)}'
 
 def post_to_telegram(text, url):
     api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -171,24 +154,29 @@ def post_to_telegram(text, url):
 
 def main():
     seen = load_seen()
-    articles = fetch_new_articles(seen)
 
-    if not articles:
+    # Grab the top unseen story from each side.
+    picks = []
+    finance = fetch_top_new(FINANCE_FEEDS, seen)
+    if finance:
+        picks.append(("finance", finance))
+    general = fetch_top_new(GENERAL_FEEDS, seen)
+    if general:
+        picks.append(("general", general))
+
+    if not picks:
         print("No new articles. Nothing to post.")
         return
 
-    print(f"Found {len(articles)} new articles. Summarising...")
-    digest = summarise_with_ai(articles)
-
-    messages = build_messages(digest)
-    for text, url in messages:
-        post_to_telegram(text, url)
+    for category, article in picks:
+        print(f"Summarising {category}: {article['title']}")
+        summary = summarise_one(article, category)
+        text = format_post(category, summary)
+        post_to_telegram(text, article["link"])
+        seen.add(article["link"])
         time.sleep(1)  # gentle pause so Telegram doesn't rate-limit
-    print(f"Posted {len(messages)} items to Telegram.")
 
-    # Mark everything we just handled as seen.
-    for a in articles:
-        seen.add(a["link"])
+    print(f"Posted {len(picks)} items to Telegram.")
     save_seen(seen)
 
 if __name__ == "__main__":
