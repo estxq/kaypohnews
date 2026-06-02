@@ -69,44 +69,76 @@ def save_seen(seen):
 # 3. PULL NEW ARTICLES FROM RSS
 # ----------------------------------------------------------------------
 
-def fetch_top_new(feeds, seen):
-    """Return the first article (from the given feeds) we haven't posted yet,
-    or None if there's nothing new."""
+def fetch_candidates(feeds, seen, limit=6):
+    """Return up to `limit` unseen articles (in feed order)."""
+    out = []
     for url in feeds:
         feed = feedparser.parse(url)
         for entry in feed.entries:
             link = entry.get("link")
             if not link or link in seen:
                 continue
-            return {
+            out.append({
                 "title": entry.get("title", "").strip(),
                 "summary": entry.get("summary", "").strip()[:400],
                 "link": link,
-            }
-    return None
+            })
+            if len(out) >= limit:
+                return out
+    return out
+
+def fetch_top_new(feeds, seen):
+    """Return the first unseen article, or None."""
+    found = fetch_candidates(feeds, seen, limit=1)
+    return found[0] if found else None
 
 # ----------------------------------------------------------------------
 # 4. ASK CLAUDE TO SUMMARISE + CLASSIFY
 # ----------------------------------------------------------------------
 
-def summarise_one(article, category):
-    """Write a one-sentence summary for a single article.
-    category is 'finance' or 'general' and shapes the angle."""
+def check_and_summarise_finance(article):
+    """For a finance candidate: decide if it fits an insurance/financial
+    advisor's professional interests, and (if so) write a one-sentence summary.
+    Returns dict: {"fits": bool, "summary": str}."""
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    if category == "finance":
-        lens = ("Summarise from a finance angle - markets/investing, banking and "
-                "interest rates, insurance, or personal finance (savings, loans, CPF). "
-                "Focus on the money/investment implication.")
-    else:
-        lens = "Summarise the key point in plain English for a general reader."
+    prompt = f"""You are the editor of "Kaypoh News", a Singapore news digest
+read by an insurance & financial advisor who posts opinions on LinkedIn.
+
+Decide if this story is useful material for her. It counts if it relates to ANY of:
+- Insurance & protection
+- CPF, MediShield, Integrated Shield, retirement, or healthcare costs
+- Personal finance & financial planning (savings, loans, household money)
+- Scams, fraud & financial literacy
+- Markets, investing & the broader economy
+- Money-related human-interest or life events (cost of living, aging, etc.)
+
+Reject ONLY stories with no money/finance/protection angle at all
+(e.g. pure sports results, celebrity gossip, entertainment).
+
+Article title: {article['title']}
+Article blurb: {article['summary']}
+
+If it fits, write ONE clear sentence summarising it.
+Respond with ONLY valid JSON: {{"fits": true/false, "summary": "..."}}"""
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+def summarise_general(article):
+    """Write a one-sentence plain-English summary for a general story."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = f"""You are the editor of "Kaypoh News", a Singapore news digest.
 
 Article title: {article['title']}
 Article blurb: {article['summary']}
 
-Write ONE clear sentence summarising this story. {lens}
+Write ONE clear sentence summarising this story for a general reader.
 Respond with ONLY valid JSON: {{"summary": "..."}}"""
 
     response = client.chat.completions.create(
@@ -114,8 +146,7 @@ Respond with ONLY valid JSON: {{"summary": "..."}}"""
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
-    data = json.loads(response.choices[0].message.content)
-    return data["summary"]
+    return json.loads(response.choices[0].message.content)["summary"]
 
 # ----------------------------------------------------------------------
 # 5. POST TO TELEGRAM
@@ -154,29 +185,37 @@ def post_to_telegram(text, url):
 
 def main():
     seen = load_seen()
+    posted = 0
 
-    # Grab the top unseen story from each side.
-    picks = []
-    finance = fetch_top_new(FINANCE_FEEDS, seen)
-    if finance:
-        picks.append(("finance", finance))
+    # --- FINANCE: walk down BT's stories until one fits our categories ---
+    finance_candidates = fetch_candidates(FINANCE_FEEDS, seen, limit=6)
+    for article in finance_candidates:
+        print(f"Checking finance: {article['title']}")
+        result = check_and_summarise_finance(article)
+        seen.add(article["link"])  # mark checked so we don't re-evaluate it
+        if result.get("fits"):
+            text = format_post("finance", result["summary"])
+            post_to_telegram(text, article["link"])
+            posted += 1
+            time.sleep(1)
+            break  # got our one finance story
+        else:
+            print("  ...skipped (not a finance topic)")
+
+    # --- GENERAL: just the top unseen story ---
     general = fetch_top_new(GENERAL_FEEDS, seen)
     if general:
-        picks.append(("general", general))
+        print(f"Summarising general: {general['title']}")
+        summary = summarise_general(general)
+        text = format_post("general", summary)
+        post_to_telegram(text, general["link"])
+        seen.add(general["link"])
+        posted += 1
 
-    if not picks:
-        print("No new articles. Nothing to post.")
-        return
-
-    for category, article in picks:
-        print(f"Summarising {category}: {article['title']}")
-        summary = summarise_one(article, category)
-        text = format_post(category, summary)
-        post_to_telegram(text, article["link"])
-        seen.add(article["link"])
-        time.sleep(1)  # gentle pause so Telegram doesn't rate-limit
-
-    print(f"Posted {len(picks)} items to Telegram.")
+    if posted == 0:
+        print("Nothing new to post.")
+    else:
+        print(f"Posted {posted} item(s) to Telegram.")
     save_seen(seen)
 
 if __name__ == "__main__":
