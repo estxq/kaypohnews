@@ -124,29 +124,42 @@ Respond with ONLY valid JSON in this exact shape:
 # ----------------------------------------------------------------------
 
 def build_messages(digest):
-    """Turn the digest into a LIST of messages - one per article."""
+    """Return a LIST of (text, url) tuples - one per article.
+
+    The url is passed separately so Telegram builds a big photo preview
+    card for it (like a proper news post)."""
     messages = []
 
     for item in digest.get("finance", []):
         s = html.escape(item["summary"])
-        messages.append(f'💰 <b>Finance</b>\n<a href="{item["link"]}">{s}</a>')
+        text = f'💰 <b>Finance</b>\n{s}'
+        messages.append((text, item["link"]))
 
     for item in digest.get("general", []):
         s = html.escape(item["summary"])
-        messages.append(f'📰 <b>General</b>\n<a href="{item["link"]}">{s}</a>')
+        text = f'📰 <b>General</b>\n{s}'
+        messages.append((text, item["link"]))
 
     return messages
 
-def post_to_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+def post_to_telegram(text, url):
+    api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    # Tell Telegram exactly which URL to preview, and prefer the BIG image.
+    link_preview = json.dumps({
+        "url": url,
+        "prefer_large_media": True,
+        "show_above_text": False,   # summary on top, photo card below
+    })
+
     data = urllib.parse.urlencode({
         "chat_id": TELEGRAM_CHANNEL,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
+        "link_preview_options": link_preview,
     }).encode()
 
-    req = urllib.request.Request(url, data=data)
+    req = urllib.request.Request(api, data=data)
     with urllib.request.urlopen(req) as resp:
         result = json.load(resp)
         if not result.get("ok"):
@@ -168,8 +181,8 @@ def main():
     digest = summarise_with_ai(articles)
 
     messages = build_messages(digest)
-    for msg in messages:
-        post_to_telegram(msg)
+    for text, url in messages:
+        post_to_telegram(text, url)
         time.sleep(1)  # gentle pause so Telegram doesn't rate-limit
     print(f"Posted {len(messages)} items to Telegram.")
 
