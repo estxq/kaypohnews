@@ -15,6 +15,7 @@ when you deploy, never hard-code them):
 import os
 import json
 import html
+import time
 import urllib.parse
 import urllib.request
 
@@ -122,24 +123,19 @@ Respond with ONLY valid JSON in this exact shape:
 # 5. POST TO TELEGRAM
 # ----------------------------------------------------------------------
 
-def build_message(digest):
-    """Turn the digest into a Telegram HTML-formatted post."""
-    lines = ["<b>🗞 Kaypoh News digest</b>", ""]
+def build_messages(digest):
+    """Turn the digest into a LIST of messages - one per article."""
+    messages = []
 
-    if digest.get("finance"):
-        lines.append("<b>💰 Finance</b>")
-        for item in digest["finance"]:
-            s = html.escape(item["summary"])
-            lines.append(f'• <a href="{item["link"]}">{s}</a>')
-        lines.append("")
+    for item in digest.get("finance", []):
+        s = html.escape(item["summary"])
+        messages.append(f'💰 <b>Finance</b>\n<a href="{item["link"]}">{s}</a>')
 
-    if digest.get("general"):
-        lines.append("<b>📰 General</b>")
-        for item in digest["general"]:
-            s = html.escape(item["summary"])
-            lines.append(f'• <a href="{item["link"]}">{s}</a>')
+    for item in digest.get("general", []):
+        s = html.escape(item["summary"])
+        messages.append(f'📰 <b>General</b>\n<a href="{item["link"]}">{s}</a>')
 
-    return "\n".join(lines)
+    return messages
 
 def post_to_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -171,9 +167,11 @@ def main():
     print(f"Found {len(articles)} new articles. Summarising...")
     digest = summarise_with_ai(articles)
 
-    message = build_message(digest)
-    post_to_telegram(message)
-    print("Posted digest to Telegram.")
+    messages = build_messages(digest)
+    for msg in messages:
+        post_to_telegram(msg)
+        time.sleep(1)  # gentle pause so Telegram doesn't rate-limit
+    print(f"Posted {len(messages)} items to Telegram.")
 
     # Mark everything we just handled as seen.
     for a in articles:
