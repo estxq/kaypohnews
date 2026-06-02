@@ -2,10 +2,10 @@ name: Kaypoh News
 
 on:
   schedule:
-    # Times are in UTC. Singapore is UTC+8.
-    # 00:00 UTC = 8am SGT (morning), 10:00 UTC = 6pm SGT (evening).
-    - cron: "0 0 * * *"
-    - cron: "0 10 * * *"
+    # Times are in UTC. Singapore is UTC+8, so subtract 8 hours.
+    - cron: "0 0 * * *"    # 8am SGT  (morning)
+    - cron: "0 6 * * *"    # 2pm SGT  (afternoon)
+    - cron: "0 14 * * *"   # 10pm SGT (night)
   workflow_dispatch:   # lets you run it manually from the Actions tab
 
 # Allow the workflow to commit the updated seen.json back to the repo.
