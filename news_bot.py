@@ -10,6 +10,11 @@ when you deploy, never hard-code them):
     OPENAI_API_KEY       - your OpenAI API key
     TELEGRAM_BOT_TOKEN   - your bot token from BotFather
     TELEGRAM_CHANNEL     - your channel, e.g. @kaypohnews
+
+CHANGE vs the original: each post now carries a "💬 Comment on this" button.
+When a subscriber taps it, the separate always-on assistant.py picks it up and
+helps her draft a LinkedIn opinion. This script itself is unchanged otherwise -
+it still just posts and exits, so it keeps running fine on GitHub Actions.
 """
 
 import os
@@ -26,25 +31,18 @@ from openai import OpenAI
 # 1. CONFIG  -  this is the only part you normally edit
 # ----------------------------------------------------------------------
 
-# FINANCE sources - markets, investing, banking, insurance, personal finance.
-# Business Times is Singapore's financial newspaper, so it's a clean fit.
 FINANCE_FEEDS = [
     "https://www.businesstimes.com.sg/rss/top-stories",   # Business Times
 ]
 
-# GENERAL sources - everyday Singapore + world news.
 GENERAL_FEEDS = [
     "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",  # CNA top
     "https://www.straitstimes.com/news/singapore/rss.xml",                    # ST Singapore
 ]
 
-# OpenAI model - GPT-4.1 Mini is cheap and good at summarising.
 MODEL = "gpt-4.1-mini"
-
-# File that remembers what we've already posted (so we don't repeat).
 SEEN_FILE = "seen.json"
 
-# Secrets from environment
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
@@ -61,7 +59,6 @@ def load_seen():
         return set()
 
 def save_seen(seen):
-    # Keep the file from growing forever - last 1000 URLs is plenty.
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen)[-1000:], f)
 
@@ -70,7 +67,6 @@ def save_seen(seen):
 # ----------------------------------------------------------------------
 
 def fetch_candidates(feeds, seen, limit=6):
-    """Return up to `limit` unseen articles (in feed order)."""
     out = []
     for url in feeds:
         feed = feedparser.parse(url)
@@ -88,20 +84,15 @@ def fetch_candidates(feeds, seen, limit=6):
     return out
 
 def fetch_top_new(feeds, seen):
-    """Return the first unseen article, or None."""
     found = fetch_candidates(feeds, seen, limit=1)
     return found[0] if found else None
 
 # ----------------------------------------------------------------------
-# 4. ASK CLAUDE TO SUMMARISE + CLASSIFY
+# 4. ASK OPENAI TO SUMMARISE + CLASSIFY
 # ----------------------------------------------------------------------
 
 def check_and_summarise_finance(article):
-    """For a finance candidate: decide if it fits an insurance/financial
-    advisor's professional interests, and (if so) write a one-sentence summary.
-    Returns dict: {"fits": bool, "summary": str}."""
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     prompt = f"""You are the editor of "Kaypoh News", a Singapore news digest
 read by an insurance & financial advisor who posts opinions on LinkedIn.
 
@@ -130,9 +121,7 @@ Respond with ONLY valid JSON: {{"fits": true/false, "summary": "..."}}"""
     return json.loads(response.choices[0].message.content)
 
 def summarise_general(article):
-    """Write a one-sentence plain-English summary for a general story."""
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     prompt = f"""You are the editor of "Kaypoh News", a Singapore news digest.
 
 Article title: {article['title']}
@@ -149,7 +138,7 @@ Respond with ONLY valid JSON: {{"summary": "..."}}"""
     return json.loads(response.choices[0].message.content)["summary"]
 
 # ----------------------------------------------------------------------
-# 5. POST TO TELEGRAM
+# 5. POST TO TELEGRAM  (now with a "Comment on this" button)
 # ----------------------------------------------------------------------
 
 def format_post(category, summary):
@@ -159,11 +148,18 @@ def format_post(category, summary):
 def post_to_telegram(text, url):
     api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    # Tell Telegram exactly which URL to preview, and prefer the BIG image.
     link_preview = json.dumps({
         "url": url,
         "prefer_large_media": True,
-        "show_above_text": False,   # summary on top, photo card below
+        "show_above_text": False,
+    })
+
+    # NEW: inline button. When tapped, assistant.py receives a callback_query
+    # with callback_data == "comment" and reads this message's text.
+    reply_markup = json.dumps({
+        "inline_keyboard": [[
+            {"text": "💬 Comment on this", "callback_data": "comment"}
+        ]]
     })
 
     data = urllib.parse.urlencode({
@@ -171,6 +167,7 @@ def post_to_telegram(text, url):
         "text": text,
         "parse_mode": "HTML",
         "link_preview_options": link_preview,
+        "reply_markup": reply_markup,
     }).encode()
 
     req = urllib.request.Request(api, data=data)
@@ -187,22 +184,20 @@ def main():
     seen = load_seen()
     posted = 0
 
-    # --- FINANCE: walk down BT's stories until one fits our categories ---
     finance_candidates = fetch_candidates(FINANCE_FEEDS, seen, limit=6)
     for article in finance_candidates:
         print(f"Checking finance: {article['title']}")
         result = check_and_summarise_finance(article)
-        seen.add(article["link"])  # mark checked so we don't re-evaluate it
+        seen.add(article["link"])
         if result.get("fits"):
             text = format_post("finance", result["summary"])
             post_to_telegram(text, article["link"])
             posted += 1
             time.sleep(1)
-            break  # got our one finance story
+            break
         else:
             print("  ...skipped (not a finance topic)")
 
-    # --- GENERAL: just the top unseen story ---
     general = fetch_top_new(GENERAL_FEEDS, seen)
     if general:
         print(f"Summarising general: {general['title']}")
