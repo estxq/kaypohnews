@@ -7,11 +7,12 @@ token as news_bot.py. news_bot.py only *sends* the news; this script only
 *listens* and replies, so they never conflict.
 
 Two flows
-  1) NEWS  -> she taps "💬 Comment on this" under a channel post. This script
-     reads the summary text in that post, asks Make (OpenAI) for 3 opinion
-     angles, and DMs them to her privately. She picks one, edits, /post.
+  1) NEWS  -> she forwards a news post (from the channel, or anywhere) to this
+     bot in their private chat. This script reads the forwarded text, asks
+     Make (OpenAI) for 3 opinion angles, and shows them as options. She picks
+     one, edits it by typing, then taps the "✅ Post to LinkedIn" button.
   2) PHOTO -> she sends a photo to the bot in a private chat, gives keywords,
-     gets caption options, picks one, edits, /post.
+     gets caption options, picks one, edits, taps "✅ Post to LinkedIn".
 
 Make.com does the AI suggestions and the LinkedIn posting (two webhooks).
 
@@ -23,13 +24,12 @@ Setup
   export OWNER_TELEGRAM_ID="her numeric Telegram user id (from @userinfobot)"
   python assistant.py
 
-IMPORTANT: she must press Start on the bot in a PRIVATE chat once, otherwise
-Telegram won't let the bot DM her.
+Both flows start with her messaging the bot directly (forwarding a post, or
+sending a photo), so Telegram always allows the reply - no need to press
+Start first, though /start still gives a quick how-to.
 
-SECURITY: the news channel has other subscribers besides her. Without a check,
-anyone who taps "Comment on this" or DMs the bot a photo would walk through the
-same flow and end up publishing to HER LinkedIn (the Make webhooks are wired to
-her account, not theirs). OWNER_TELEGRAM_ID locks the whole flow to her user id.
+SECURITY: OWNER_TELEGRAM_ID locks every flow to her user id only, since the
+Make webhooks are wired to one specific LinkedIn account.
 """
 
 import os
@@ -80,6 +80,28 @@ def show_options(uid, header, options):
     text = header + "\n\n" + "\n\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
     bot.send_message(uid, text, reply_markup=options_keyboard(options))
 
+def draft_keyboard():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✅ Post to LinkedIn", callback_data="do_post"))
+    return kb
+
+def do_publish(uid, notify):
+    """notify(text) sends feedback back to her. Shared by the button and /post."""
+    st = get_state(uid)
+    if not st.get("draft"):
+        notify("No draft yet. Forward an article, pick a perspective, or send a photo first.")
+        return
+    publish_mode = "image" if st.get("image_url") else "text"
+    notify("Posting to LinkedIn…")
+    try:
+        result = publish_to_linkedin(publish_mode, st["draft"], st.get("image_url"))
+    except Exception as e:
+        bot.send_message(uid, f"Posting failed: {e}")
+        return
+    url = result.get("url", "")
+    bot.send_message(uid, "✅ Posted!" + (f"\n{url}" if url else ""))
+    STATE.pop(uid, None)
+
 
 # ---------------------------------------------------------------- /start
 @bot.message_handler(commands=["start"])
@@ -88,37 +110,32 @@ def cmd_start(message):
     bot.reply_to(
         message,
         "Hi! I help you post to LinkedIn.\n\n"
-        "• In the news channel, tap “💬 Comment on this” under any story to draft an opinion.\n"
+        "• Forward me a news article you want to comment on, and I'll suggest angles.\n"
         "• Or send me a photo here and I'll help you write a caption.\n\n"
-        "When a draft is ready, type edits to change it, then send /post to publish.",
+        "Pick a suggestion, type edits if you like, then tap ✅ Post to LinkedIn when ready.",
     )
 
 
-# ---------------------------------------------------------------- NEWS: comment tapped
-@bot.callback_query_handler(func=lambda c: c.data == "comment")
-def on_comment(call):
-    uid = call.from_user.id
+# ---------------------------------------------------------------- NEWS: article forwarded
+@bot.message_handler(func=lambda m: m.forward_date is not None, content_types=["text"])
+def on_forwarded_article(message):
+    uid = message.from_user.id
     if not is_owner(uid):
-        bot.answer_callback_query(call.id, "This bot is private.")
+        bot.reply_to(message, "This bot is private.")
         return
-    # The article content is just the summary text already shown in the post.
-    article = call.message.text or call.message.caption or ""
-    bot.answer_callback_query(call.id, "Thinking of some angles… check your DMs.")
+    article = message.text or message.caption or ""
+    if not article:
+        bot.reply_to(message, "Couldn't read any text from that — try forwarding the original post.")
+        return
+    bot.send_chat_action(uid, "typing")
     try:
         options = ask_make_for_suggestions("opinion", article)
     except Exception as e:
-        try:
-            bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
-        except Exception:
-            bot.answer_callback_query(call.id, "Please press Start on me in a private chat first.")
+        bot.reply_to(message, f"Sorry, couldn't get suggestions: {e}")
         return
     st = get_state(uid)
     st.update(mode="opinion", options=options, image_url=None, draft=None, stage="choosing")
-    try:
-        show_options(uid, "Here are some angles you could post:", options)
-    except Exception:
-        # Most common cause: she hasn't started the bot privately yet.
-        bot.answer_callback_query(call.id, "Press Start on me in a private chat, then tap again.")
+    show_options(uid, "Here are some angles you could post:", options)
 
 
 # ---------------------------------------------------------------- PHOTO flow
@@ -157,31 +174,30 @@ def on_pick(call):
         uid,
         "Here's your draft:\n\n"
         f"{st['draft']}\n\n"
-        "✏️ Type any edits to replace it, or send /post to publish.",
+        "✏️ Type any edits to replace it, then tap ✅ when ready.",
+        reply_markup=draft_keyboard(),
     )
 
 
-# ---------------------------------------------------------------- /post
+# ---------------------------------------------------------------- ✅ Post to LinkedIn button
+@bot.callback_query_handler(func=lambda c: c.data == "do_post")
+def on_post_button(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    bot.answer_callback_query(call.id, "Posting…")
+    do_publish(uid, lambda t: bot.send_message(uid, t))
+
+
+# ---------------------------------------------------------------- /post (fallback)
 @bot.message_handler(commands=["post"])
 def cmd_post(message):
     uid = message.from_user.id
     if not is_owner(uid):
         bot.reply_to(message, "This bot is private.")
         return
-    st = get_state(uid)
-    if not st.get("draft"):
-        bot.reply_to(message, "No draft yet. Pick an option or send a photo first.")
-        return
-    publish_mode = "image" if st.get("image_url") else "text"
-    bot.reply_to(message, "Posting to LinkedIn…")
-    try:
-        result = publish_to_linkedin(publish_mode, st["draft"], st.get("image_url"))
-    except Exception as e:
-        bot.send_message(uid, f"Posting failed: {e}")
-        return
-    url = result.get("url", "")
-    bot.send_message(uid, "✅ Posted!" + (f"\n{url}" if url else ""))
-    STATE.pop(uid, None)
+    do_publish(uid, lambda t: bot.reply_to(message, t))
 
 
 # ---------------------------------------------------------------- catch-all text
@@ -204,10 +220,11 @@ def on_text(message):
 
     elif stage == "editing":
         st["draft"] = message.text
-        bot.reply_to(message, "Updated your draft. Send /post to publish, or keep editing.")
+        bot.reply_to(message, "Updated your draft. Tap ✅ when ready, or keep editing.",
+                     reply_markup=draft_keyboard())
 
     else:
-        bot.reply_to(message, "Send me a photo, or tap “💬 Comment on this” under a news post to begin.")
+        bot.reply_to(message, "Forward me a news article to comment on, or send me a photo to caption.")
 
 
 if __name__ == "__main__":

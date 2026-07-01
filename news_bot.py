@@ -11,10 +11,10 @@ when you deploy, never hard-code them):
     TELEGRAM_BOT_TOKEN   - your bot token from BotFather
     TELEGRAM_CHANNEL     - your channel, e.g. @kaypohnews
 
-CHANGE vs the original: each post now carries a "💬 Comment on this" button.
-When a subscriber taps it, the separate always-on assistant.py picks it up and
-helps her draft a LinkedIn opinion. This script itself is unchanged otherwise -
-it still just posts and exits, so it keeps running fine on GitHub Actions.
+To turn a story into a LinkedIn opinion, she forwards the post to the
+separate always-on assistant.py bot in their private chat, which picks up
+the forward and helps her draft it. This script just posts and exits, so it
+keeps running fine on GitHub Actions.
 """
 
 import os
@@ -138,7 +138,7 @@ Respond with ONLY valid JSON: {{"summary": "..."}}"""
     return json.loads(response.choices[0].message.content)["summary"]
 
 # ----------------------------------------------------------------------
-# 5. POST TO TELEGRAM  (now with a "Comment on this" button)
+# 5. POST TO TELEGRAM
 # ----------------------------------------------------------------------
 
 def format_post(category, summary):
@@ -154,20 +154,13 @@ def post_to_telegram(text, url):
         "show_above_text": False,
     })
 
-    # NEW: inline button. When tapped, assistant.py receives a callback_query
-    # with callback_data == "comment" and reads this message's text.
-    reply_markup = json.dumps({
-        "inline_keyboard": [[
-            {"text": "💬 Comment on this", "callback_data": "comment"}
-        ]]
-    })
-
+    # No button needed: she forwards whichever post interests her straight
+    # to the assistant bot's private chat, and it picks up the forward there.
     data = urllib.parse.urlencode({
         "chat_id": TELEGRAM_CHANNEL,
         "text": text,
         "parse_mode": "HTML",
         "link_preview_options": link_preview,
-        "reply_markup": reply_markup,
     }).encode()
 
     req = urllib.request.Request(api, data=data)
