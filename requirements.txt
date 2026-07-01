@@ -1,2 +1,4 @@
 feedparser
 openai
+pyTelegramBotAPI
+requests

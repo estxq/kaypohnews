@@ -20,10 +20,16 @@ Setup
   export TELEGRAM_BOT_TOKEN="same token as news_bot.py"
   export MAKE_SUGGEST_URL="Make webhook that returns {'options':[...]}"
   export MAKE_PUBLISH_URL="Make webhook that posts to LinkedIn"
+  export OWNER_TELEGRAM_ID="her numeric Telegram user id (from @userinfobot)"
   python assistant.py
 
 IMPORTANT: she must press Start on the bot in a PRIVATE chat once, otherwise
 Telegram won't let the bot DM her.
+
+SECURITY: the news channel has other subscribers besides her. Without a check,
+anyone who taps "Comment on this" or DMs the bot a photo would walk through the
+same flow and end up publishing to HER LinkedIn (the Make webhooks are wired to
+her account, not theirs). OWNER_TELEGRAM_ID locks the whole flow to her user id.
 """
 
 import os
@@ -34,8 +40,12 @@ from telebot import types
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # SAME token as news_bot.py
 MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options
 MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # posts to LinkedIn
+OWNER_TELEGRAM_ID  = int(os.environ["OWNER_TELEGRAM_ID"])  # only this user may use the bot
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+def is_owner(uid):
+    return uid == OWNER_TELEGRAM_ID
 
 # State keyed by user id (same as their private chat id).
 STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode)
@@ -88,6 +98,9 @@ def cmd_start(message):
 @bot.callback_query_handler(func=lambda c: c.data == "comment")
 def on_comment(call):
     uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
     # The article content is just the summary text already shown in the post.
     article = call.message.text or call.message.caption or ""
     bot.answer_callback_query(call.id, "Thinking of some angles… check your DMs.")
@@ -112,6 +125,9 @@ def on_comment(call):
 @bot.message_handler(content_types=["photo"])
 def on_photo(message):
     uid = message.from_user.id
+    if not is_owner(uid):
+        bot.reply_to(message, "This bot is private.")
+        return
     file_id = message.photo[-1].file_id           # highest resolution
     file_info = bot.get_file(file_id)
     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}"
@@ -125,6 +141,9 @@ def on_photo(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pick:"))
 def on_pick(call):
     uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
     st = get_state(uid)
     idx = int(call.data.split(":", 1)[1])
     options = st.get("options") or []
@@ -146,6 +165,9 @@ def on_pick(call):
 @bot.message_handler(commands=["post"])
 def cmd_post(message):
     uid = message.from_user.id
+    if not is_owner(uid):
+        bot.reply_to(message, "This bot is private.")
+        return
     st = get_state(uid)
     if not st.get("draft"):
         bot.reply_to(message, "No draft yet. Pick an option or send a photo first.")
