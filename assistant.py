@@ -50,11 +50,27 @@ def is_owner(uid):
     return uid in OWNER_TELEGRAM_IDS
 
 # State keyed by user id (same as their private chat id).
-STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode)
+STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode, article_url)
 
 def get_state(uid):
-    return STATE.setdefault(uid, {"stage": None, "draft": None,
-                                  "options": None, "image_url": None, "mode": None})
+    return STATE.setdefault(uid, {"stage": None, "draft": None, "options": None,
+                                  "image_url": None, "mode": None, "article_url": None})
+
+
+def extract_url(message):
+    """Pull the article link out of a forwarded post so it can be cited on
+    LinkedIn. news_bot.py adds the link as a text_link; articles forwarded from
+    elsewhere usually carry a plain url entity or a link-preview url instead."""
+    text = message.text or message.caption or ""
+    for e in (message.entities or []) + (message.caption_entities or []):
+        if e.type == "text_link" and getattr(e, "url", None):
+            return e.url
+        if e.type == "url":
+            return text[e.offset:e.offset + e.length]
+    lpo = getattr(message, "link_preview_options", None)
+    if lpo is not None and getattr(lpo, "url", None):
+        return lpo.url
+    return None
 
 
 # ---------------------------------------------------------------- Make helpers
@@ -94,9 +110,13 @@ def do_publish(uid, notify):
         notify("No draft yet. Forward an article, pick a perspective, or send a photo first.")
         return
     publish_mode = "image" if st.get("image_url") else "text"
+    # Cite the source article on opinion posts so readers see what she's reacting to.
+    text = st["draft"]
+    if publish_mode == "text" and st.get("article_url"):
+        text = f"{text}\n\n{st['article_url']}"
     notify("Posting to LinkedIn…")
     try:
-        result = publish_to_linkedin(publish_mode, st["draft"], st.get("image_url"))
+        result = publish_to_linkedin(publish_mode, text, st.get("image_url"))
     except Exception as e:
         bot.send_message(uid, f"Posting failed: {e}")
         return
@@ -136,7 +156,8 @@ def on_forwarded_article(message):
         bot.reply_to(message, f"Sorry, couldn't get suggestions: {e}")
         return
     st = get_state(uid)
-    st.update(mode="opinion", options=options, image_url=None, draft=None, stage="choosing")
+    st.update(mode="opinion", options=options, image_url=None, draft=None,
+              stage="choosing", article_url=extract_url(message))
     show_options(uid, "Here are some angles you could post:", options)
 
 
@@ -152,7 +173,7 @@ def on_photo(message):
     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}"
     st = get_state(uid)
     st.update(mode="caption", image_url=image_url, stage="awaiting_keywords",
-              options=None, draft=None)
+              options=None, draft=None, article_url=None)
     bot.reply_to(message, "Nice photo! Send me a few keywords about it and I'll suggest captions.")
 
 
@@ -172,11 +193,14 @@ def on_pick(call):
     st["draft"] = options[idx]
     st["stage"] = "editing"
     bot.answer_callback_query(call.id, "Loaded into your draft.")
+    link_note = "\n🔗 The article link will be added to the post automatically." \
+        if st.get("article_url") else ""
     bot.send_message(
         uid,
         "Here's your draft:\n\n"
         f"{st['draft']}\n\n"
-        "✏️ Type any edits to replace it, then tap ✅ when ready.",
+        "✏️ Type any edits to replace it, then tap ✅ when ready."
+        f"{link_note}",
         reply_markup=draft_keyboard(),
     )
 

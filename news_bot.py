@@ -141,9 +141,13 @@ Respond with ONLY valid JSON: {{"summary": "..."}}"""
 # 5. POST TO TELEGRAM
 # ----------------------------------------------------------------------
 
-def format_post(category, summary):
+def format_post(category, summary, url):
     label = "💰 <b>Finance</b>" if category == "finance" else "📰 <b>General</b>"
-    return f'{label}\n{html.escape(summary)}'
+    # The article link is embedded as a real text link (not just the preview card)
+    # so that when she forwards the post to the assistant bot, the assistant can
+    # read the link back out and cite it on the LinkedIn post.
+    read_more = f'<a href="{html.escape(url, quote=True)}">🔗 Read the full article</a>'
+    return f'{label}\n{html.escape(summary)}\n\n{read_more}'
 
 def post_to_telegram(text, url):
     api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -183,7 +187,7 @@ def main():
         result = check_and_summarise_finance(article)
         seen.add(article["link"])
         if result.get("fits"):
-            text = format_post("finance", result["summary"])
+            text = format_post("finance", result["summary"], article["link"])
             post_to_telegram(text, article["link"])
             posted += 1
             time.sleep(1)
@@ -195,7 +199,7 @@ def main():
     if general:
         print(f"Summarising general: {general['title']}")
         summary = summarise_general(general)
-        text = format_post("general", summary)
+        text = format_post("general", summary, general["link"])
         post_to_telegram(text, general["link"])
         seen.add(general["link"])
         posted += 1
