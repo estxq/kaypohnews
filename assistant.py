@@ -21,7 +21,8 @@ Setup
   export TELEGRAM_BOT_TOKEN="same token as news_bot.py"
   export MAKE_SUGGEST_URL="Make webhook that returns {'options':[...]}"
   export MAKE_PUBLISH_URL="Make webhook that posts to LinkedIn"
-  export OWNER_TELEGRAM_ID="her numeric Telegram user id (from @userinfobot)"
+  export OWNER_TELEGRAM_ID="allowed numeric Telegram user id(s), comma-separated
+                            e.g. 111111111 or 111111111,222222222 (her + tester)"
   python assistant.py
 
 Both flows start with her messaging the bot directly (forwarding a post, or
@@ -40,12 +41,13 @@ from telebot import types
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # SAME token as news_bot.py
 MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options
 MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # posts to LinkedIn
-OWNER_TELEGRAM_ID  = int(os.environ["OWNER_TELEGRAM_ID"])  # only this user may use the bot
+# One or more allowed user ids, comma-separated (e.g. "111,222" for her + a tester).
+OWNER_TELEGRAM_IDS = {int(x) for x in os.environ["OWNER_TELEGRAM_ID"].split(",") if x.strip()}
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 def is_owner(uid):
-    return uid == OWNER_TELEGRAM_ID
+    return uid in OWNER_TELEGRAM_IDS
 
 # State keyed by user id (same as their private chat id).
 STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode)
