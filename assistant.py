@@ -34,6 +34,7 @@ Make webhooks are wired to one specific LinkedIn account.
 """
 
 import os
+import html
 import requests
 import telebot
 from telebot import types
@@ -88,15 +89,20 @@ def publish_to_linkedin(mode, text, image_url=None):
     r.raise_for_status()
     return r.json()
 
-def options_keyboard(options):
-    kb = types.InlineKeyboardMarkup()
-    for i, _ in enumerate(options):
-        kb.add(types.InlineKeyboardButton(f"Use option {i + 1}", callback_data=f"pick:{i}"))
-    return kb
-
-def show_options(uid, header, options):
-    text = header + "\n\n" + "\n\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
-    bot.send_message(uid, text, reply_markup=options_keyboard(options))
+def show_options(uid, header, options, label):
+    """Send the header, then each option as its OWN message with a bold
+    "<label> N" title (e.g. POV 1) and its own pick button. Separate bubbles
+    keep long, LinkedIn-length drafts easy to tell apart and to copy."""
+    bot.send_message(uid, f"<b>{html.escape(header, quote=False)}</b>", parse_mode="HTML")
+    for i, o in enumerate(options):
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(f"✍️ Use {label} {i + 1}", callback_data=f"pick:{i}"))
+        bot.send_message(
+            uid,
+            f"<b>{label} {i + 1}</b>\n\n{html.escape(o, quote=False)}",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
 
 def draft_keyboard():
     kb = types.InlineKeyboardMarkup()
@@ -158,7 +164,7 @@ def on_forwarded_article(message):
     st = get_state(uid)
     st.update(mode="opinion", options=options, image_url=None, draft=None,
               stage="choosing", article_url=extract_url(message))
-    show_options(uid, "Here are some angles you could post:", options)
+    show_options(uid, "Here are some angles you could post:", options, "POV")
 
 
 # ---------------------------------------------------------------- PHOTO flow
@@ -242,7 +248,7 @@ def on_text(message):
             bot.reply_to(message, f"Sorry, couldn't get captions: {e}")
             return
         st.update(options=options, stage="choosing")
-        show_options(uid, "Here are some caption ideas:", options)
+        show_options(uid, "Here are some caption ideas:", options, "Caption")
 
     elif stage == "editing":
         st["draft"] = message.text
