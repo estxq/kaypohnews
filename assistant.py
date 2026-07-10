@@ -180,7 +180,16 @@ def on_photo(message):
     st = get_state(uid)
     st.update(mode="caption", image_url=image_url, stage="awaiting_keywords",
               options=None, draft=None, article_url=None)
-    bot.reply_to(message, "Nice photo! Send me a few keywords about it and I'll suggest captions.")
+    bot.reply_to(
+        message,
+        "Nice photo! 📸\n\n"
+        "Tell me what happened — the more you dump, the better the post:\n"
+        "• What was the event or moment?\n"
+        "• Who was there (names)?\n"
+        "• What did you do / achieve?\n"
+        "• Any funny, memorable or honest bits, and how you felt?\n\n"
+        "Just type it all out casually and I'll shape it into a LinkedIn story.",
+    )
 
 
 # ---------------------------------------------------------------- option picker
