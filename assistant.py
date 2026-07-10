@@ -241,6 +241,22 @@ def cmd_post(message):
     do_publish(uid, lambda t: bot.reply_to(message, t))
 
 
+# ---------------------------------------------------------------- caption helper
+def generate_captions(uid, keywords):
+    """Turn her notes into caption options. Reused for the first go AND for
+    every regenerate, so she can keep resending (tweaked) notes for a fresh set
+    without having to upload the photo again."""
+    bot.send_chat_action(uid, "typing")
+    try:
+        options = ask_make_for_suggestions("caption", keywords)
+    except Exception as e:
+        bot.send_message(uid, f"Sorry, couldn't get captions: {e}")
+        return
+    get_state(uid).update(options=options, stage="choosing")
+    show_options(uid, "Here are some caption ideas:", options, "Caption")
+    bot.send_message(uid, "💡 Not quite right? Just send your notes again (tweaked) for a fresh set.")
+
+
 # ---------------------------------------------------------------- catch-all text
 # Keep LAST so /start and /post are handled first.
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -249,15 +265,12 @@ def on_text(message):
     st = get_state(uid)
     stage = st.get("stage")
 
-    if stage == "awaiting_keywords":
-        bot.send_chat_action(uid, "typing")
-        try:
-            options = ask_make_for_suggestions("caption", message.text)
-        except Exception as e:
-            bot.reply_to(message, f"Sorry, couldn't get captions: {e}")
-            return
-        st.update(options=options, stage="choosing")
-        show_options(uid, "Here are some caption ideas:", options, "Caption")
+    # Caption flow: while she hasn't locked in a draft yet (still giving notes
+    # or looking at options), any text is treated as (new) notes -> fresh
+    # captions. This is what lets her keep regenerating by resending notes.
+    if st.get("mode") == "caption" and st.get("image_url") \
+            and stage in ("awaiting_keywords", "choosing"):
+        generate_captions(uid, message.text)
 
     elif stage == "editing":
         st["draft"] = message.text
