@@ -116,10 +116,23 @@ def resolve_opinion_source(uid, message):
         meta = fetch_article_meta(url)
         if meta:
             title, desc, image = meta.get("title"), meta.get("description"), meta.get("image")
-            if bare_link and meta.get("text"):
-                return meta["text"], url, title, desc, image
+            body = meta.get("text") or ""
+            if bare_link:
+                # Require real article length so a blocked/short scrape (e.g. a
+                # cookie notice) never gets passed to the AI as "the article" -
+                # that's what made it echo the prompt's example text verbatim.
+                if len(body) >= 200:
+                    return body, url, title, desc, image
+                # Fall back to title + description, which are still real content.
+                fallback = " — ".join(p for p in (title, desc) if p)
+                if len(fallback) >= 40:
+                    return fallback, url, title, desc, image
+                bot.send_message(uid, "(That site blocked me from reading the full article — "
+                                      "paste a short summary and I'll use that instead.)")
+                return None, url, title, desc, image
         elif bare_link:
-            bot.send_message(uid, "(Couldn't read that link — I'll use what you sent instead.)")
+            bot.send_message(uid, "(Couldn't read that link — paste a short summary instead.)")
+            return None, url, title, desc, image
     return text, url, title, desc, image
 
 
@@ -245,14 +258,26 @@ def cmd_start(message):
 
 
 # ---------------------------------------------------------------- NEWS: opinion helper
+def _looks_like_placeholder(text):
+    """Catch the model echoing the prompt's own example ("post 1", "caption 2",
+    "take 3"...) instead of writing real content - happens when it's given too
+    little to react to."""
+    t = (text or "").strip().lower().rstrip(".!")
+    return len(t) < 25 or t in {f"{w} {i}" for w in ("post", "caption", "take", "option")
+                                for i in ("1", "2", "3")}
+
 def generate_opinions(uid, content, article_url=None, article_title=None,
                       article_desc=None, article_image=None):
     """Turn an article (forwarded, typed or pasted) into 3 opinion angles.
     Reused for the first go and for every regenerate."""
+    if not content:
+        bot.send_message(uid, "I don't have enough to work with — send the article text "
+                              "or forward the original post.")
+        return
     bot.send_chat_action(uid, "typing")
-    # With long article text the model sometimes returns fewer than 3 angles;
-    # retry a couple of times so she reliably gets a full set without having to
-    # hit Regenerate. Keep the best (most-options) result.
+    # With long article text the model sometimes returns fewer than 3 real
+    # angles (or echoes the prompt's own example); retry a couple of times so
+    # she reliably gets a full, real set without having to hit Regenerate.
     options = []
     for _ in range(3):
         try:
@@ -262,10 +287,15 @@ def generate_opinions(uid, content, article_url=None, article_title=None,
                 bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
                 return
             break
+        got = [o for o in got if not _looks_like_placeholder(o)]
         if len(got) > len(options):
             options = got
         if len(options) >= 3:
             break
+    if not options:
+        bot.send_message(uid, "Couldn't generate real suggestions from that — try pasting "
+                              "a short summary of the article instead of just the link.")
+        return
     get_state(uid).update(mode="opinion", options=options, image_url=None, draft=None,
                           stage="choosing", article_url=article_url,
                           article_title=article_title, article_desc=article_desc,
