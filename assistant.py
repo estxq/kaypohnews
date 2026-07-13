@@ -55,7 +55,8 @@ STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode, article_u
 
 def get_state(uid):
     return STATE.setdefault(uid, {"stage": None, "draft": None, "options": None,
-                                  "image_url": None, "mode": None, "article_url": None})
+                                  "image_url": None, "mode": None, "article_url": None,
+                                  "source": None})
 
 
 def extract_url(message):
@@ -103,6 +104,11 @@ def show_options(uid, header, options, label):
             reply_markup=kb,
             parse_mode="HTML",
         )
+    # A regenerate button so she can get a whole fresh set without re-forwarding
+    # the article or re-uploading the photo (the source is kept in state).
+    regen_kb = types.InlineKeyboardMarkup()
+    regen_kb.add(types.InlineKeyboardButton("🔄 Regenerate (fresh set)", callback_data="regen"))
+    bot.send_message(uid, "Not quite right?", reply_markup=regen_kb)
 
 def draft_keyboard():
     kb = types.InlineKeyboardMarkup()
@@ -171,7 +177,7 @@ def on_forwarded_article(message):
         return
     st = get_state(uid)
     st.update(mode="opinion", options=options, image_url=None, draft=None,
-              stage="choosing", article_url=extract_url(message))
+              stage="choosing", article_url=extract_url(message), source=article)
     show_options(uid, "Here are some angles you could post:", options, "POV")
 
 
@@ -219,6 +225,32 @@ def on_pick(call):
     send_draft(uid)
 
 
+# ---------------------------------------------------------------- 🔄 Regenerate
+@bot.callback_query_handler(func=lambda c: c.data == "regen")
+def on_regen(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    st = get_state(uid)
+    src, mode = st.get("source"), st.get("mode")
+    if not src or mode not in ("opinion", "caption"):
+        bot.answer_callback_query(call.id, "Nothing to regenerate yet.")
+        return
+    bot.answer_callback_query(call.id, "Fresh set coming up…")
+    bot.send_chat_action(uid, "typing")
+    try:
+        options = ask_make_for_suggestions(mode, src)
+    except Exception as e:
+        bot.send_message(uid, f"Sorry, couldn't regenerate: {e}")
+        return
+    st.update(options=options, stage="choosing")
+    if mode == "opinion":
+        show_options(uid, "Here are some fresh angles:", options, "POV")
+    else:
+        show_options(uid, "Here are some fresh caption ideas:", options, "Caption")
+
+
 # ---------------------------------------------------------------- ✅ Post to LinkedIn button
 @bot.callback_query_handler(func=lambda c: c.data == "do_post")
 def on_post_button(call):
@@ -251,9 +283,8 @@ def generate_captions(uid, keywords):
     except Exception as e:
         bot.send_message(uid, f"Sorry, couldn't get captions: {e}")
         return
-    get_state(uid).update(options=options, stage="choosing")
+    get_state(uid).update(options=options, stage="choosing", source=keywords)
     show_options(uid, "Here are some caption ideas:", options, "Caption")
-    bot.send_message(uid, "💡 Not quite right? Just send your notes again (tweaked) for a fresh set.")
 
 
 # ---------------------------------------------------------------- catch-all text
