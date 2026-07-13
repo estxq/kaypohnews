@@ -164,6 +164,21 @@ def cmd_start(message):
     )
 
 
+# ---------------------------------------------------------------- NEWS: opinion helper
+def generate_opinions(uid, content, article_url=None):
+    """Turn an article (forwarded, typed or pasted) into 3 opinion angles.
+    Reused for the first go and for every regenerate."""
+    bot.send_chat_action(uid, "typing")
+    try:
+        options = ask_make_for_suggestions("opinion", content)
+    except Exception as e:
+        bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
+        return
+    get_state(uid).update(mode="opinion", options=options, image_url=None, draft=None,
+                          stage="choosing", article_url=article_url, source=content)
+    show_options(uid, "Here are some angles you could post:", options, "POV")
+
+
 # ---------------------------------------------------------------- NEWS: article forwarded
 @bot.message_handler(func=lambda m: m.forward_date is not None, content_types=["text"])
 def on_forwarded_article(message):
@@ -175,16 +190,7 @@ def on_forwarded_article(message):
     if not article:
         bot.reply_to(message, "Couldn't read any text from that — try forwarding the original post.")
         return
-    bot.send_chat_action(uid, "typing")
-    try:
-        options = ask_make_for_suggestions("opinion", article)
-    except Exception as e:
-        bot.reply_to(message, f"Sorry, couldn't get suggestions: {e}")
-        return
-    st = get_state(uid)
-    st.update(mode="opinion", options=options, image_url=None, draft=None,
-              stage="choosing", article_url=extract_url(message), source=article)
-    show_options(uid, "Here are some angles you could post:", options, "POV")
+    generate_opinions(uid, article, extract_url(message))
 
 
 # ---------------------------------------------------------------- PHOTO flow
@@ -313,7 +319,13 @@ def on_text(message):
         send_draft(uid)
 
     else:
-        bot.reply_to(message, "Forward me a news article to comment on, or send me a photo to caption.")
+        # Any other text (typed or pasted article/link) auto-generates 3 angles.
+        text = (message.text or "").strip()
+        if len(text) < 10:
+            bot.reply_to(message, "Send me an article — forward it or paste the text — "
+                                  "and I'll suggest 3 angles. Or send a photo to caption.")
+        else:
+            generate_opinions(uid, message.text, extract_url(message))
 
 
 if __name__ == "__main__":
