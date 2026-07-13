@@ -147,21 +147,35 @@ def show_options(uid, header, options, label):
     "<label> N" title (e.g. POV 1) and its own pick button. Separate bubbles
     keep long, LinkedIn-length drafts easy to tell apart and to copy."""
     n = len(options)
-    bot.send_message(
-        uid,
-        f"<b>{html.escape(header, quote=False)}</b>\n"
-        f"({n} to choose from — scroll down 👇)",
-        parse_mode="HTML",
-    )
+    try:
+        bot.send_message(
+            uid,
+            f"<b>{html.escape(header, quote=False)}</b>\n"
+            f"({n} to choose from — scroll down 👇)",
+            parse_mode="HTML",
+        )
+    except Exception:
+        bot.send_message(uid, f"{header}\n({n} to choose from — scroll down 👇)")
+    # Each option is its OWN bubble with its own pick button. Sends are made
+    # resilient so a single long or oddly-formatted option can't stop the rest:
+    # try HTML first, then fall back to plain text, chunking to Telegram's limit.
     for i, o in enumerate(options):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(f"✍️ Use {label} {i + 1}", callback_data=f"pick:{i}"))
-        bot.send_message(
-            uid,
-            f"<b>{label} {i + 1} of {n}</b>\n\n{html.escape(o, quote=False)}",
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
+        title = f"{label} {i + 1} of {n}"
+        html_text = f"<b>{title}</b>\n\n{html.escape(o, quote=False)}"
+        try:
+            if len(html_text) > 4000:
+                raise ValueError("too long for one message")
+            bot.send_message(uid, html_text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            plain = f"{title}\n\n{o}"
+            if len(plain) > 4000:
+                plain = plain[:3990] + "…"
+            try:
+                bot.send_message(uid, plain, reply_markup=kb)
+            except Exception:
+                bot.send_message(uid, plain[:3990], reply_markup=kb)
     # A regenerate button so she can get a whole fresh set without re-forwarding
     # the article or re-uploading the photo (the source is kept in state).
     regen_kb = types.InlineKeyboardMarkup()
