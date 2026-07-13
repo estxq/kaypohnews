@@ -56,6 +56,7 @@ STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode, article_u
 def get_state(uid):
     return STATE.setdefault(uid, {"stage": None, "draft": None, "options": None,
                                   "image_url": None, "mode": None, "article_url": None,
+                                  "article_title": None, "article_desc": None,
                                   "source": None})
 
 
@@ -75,10 +76,10 @@ def extract_url(message):
     return None
 
 
-def fetch_article_text(url, limit=4000):
-    """Download an article and pull out its main text, so she can send just a
-    link (any site, not only the channel) and still get opinion angles. Returns
-    None on any failure so the caller can fall back gracefully."""
+def fetch_article_meta(url, limit=4000):
+    """Download an article and pull out its main text plus title/description.
+    Text lets the AI react to a bare link; title/description feed the LinkedIn
+    preview card. Returns None on any failure so callers can fall back."""
     try:
         import trafilatura
     except ImportError:
@@ -88,25 +89,37 @@ def fetch_article_text(url, limit=4000):
         if not downloaded:
             return None
         text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
-        return text.strip()[:limit] if text else None
+        meta = trafilatura.extract_metadata(downloaded)
+        return {
+            "text": (text.strip()[:limit] if text else None),
+            "title": (getattr(meta, "title", None) if meta else None),
+            "description": (getattr(meta, "description", None) if meta else None),
+        }
     except Exception:
         return None
 
 
 def resolve_opinion_source(uid, message):
-    """Decide what to comment on: normally her message text, but if she basically
-    just sent a link, fetch the linked article's text so the AI has real material.
-    Returns (content, article_url)."""
+    """Decide what to comment on and gather link-card details.
+    Returns (content, url, title, description). If she basically just sent a
+    link, the article text is fetched for the AI; either way, when a link is
+    present we grab its title/description for the LinkedIn preview card."""
     url = extract_url(message)
     text = (message.text or message.caption or "").strip()
     remainder = text.replace(url, "").strip() if url else text
-    if url and len(remainder) < 80:
-        bot.send_message(uid, "🔗 Reading the article…")
-        fetched = fetch_article_text(url)
-        if fetched:
-            return fetched, url
-        bot.send_message(uid, "(Couldn't read that link — I'll use what you sent instead.)")
-    return text, url
+    bare_link = bool(url) and len(remainder) < 80
+    title = desc = None
+    if url:
+        if bare_link:
+            bot.send_message(uid, "🔗 Reading the article…")
+        meta = fetch_article_meta(url)
+        if meta:
+            title, desc = meta.get("title"), meta.get("description")
+            if bare_link and meta.get("text"):
+                return meta["text"], url, title, desc
+        elif bare_link:
+            bot.send_message(uid, "(Couldn't read that link — I'll use what you sent instead.)")
+    return text, url, title, desc
 
 
 # ---------------------------------------------------------------- Make helpers
@@ -116,10 +129,12 @@ def ask_make_for_suggestions(mode, content):
     r.raise_for_status()
     return r.json().get("options", [])
 
-def publish_to_linkedin(mode, text, image_url=None):
-    """mode = 'text' or 'image'. Returns Make's JSON response."""
+def publish_to_linkedin(mode, text, image_url=None, link=None, link_title=None, link_desc=None):
+    """mode = 'text' (plain), 'image' (photo) or 'article' (link with preview
+    card). Returns Make's JSON response."""
     r = requests.post(MAKE_PUBLISH_URL,
-                      json={"mode": mode, "text": text, "image_url": image_url},
+                      json={"mode": mode, "text": text, "image_url": image_url,
+                            "link": link, "link_title": link_title, "link_desc": link_desc},
                       timeout=60)
     r.raise_for_status()
     return r.json()
@@ -169,14 +184,23 @@ def do_publish(uid, notify):
     if not st.get("draft"):
         notify("No draft yet. Forward an article, pick a perspective, or send a photo first.")
         return
-    publish_mode = "image" if st.get("image_url") else "text"
-    # Cite the source article on opinion posts so readers see what she's reacting to.
     text = st["draft"]
-    if publish_mode == "text" and st.get("article_url"):
-        text = f"{text}\n\n{st['article_url']}"
+    link = link_title = link_desc = None
+    if st.get("image_url"):
+        publish_mode = "image"
+    elif st.get("article_url"):
+        # Post as an article share so LinkedIn shows the preview card, instead
+        # of gluing an ugly shortened link onto the text.
+        publish_mode = "article"
+        link = st["article_url"]
+        link_title = (st.get("article_title") or "Read the article")[:400]
+        link_desc = st.get("article_desc")
+    else:
+        publish_mode = "text"
     notify("Posting to LinkedIn…")
     try:
-        result = publish_to_linkedin(publish_mode, text, st.get("image_url"))
+        result = publish_to_linkedin(publish_mode, text, st.get("image_url"),
+                                     link, link_title, link_desc)
     except Exception as e:
         bot.send_message(uid, f"Posting failed: {e}")
         return
@@ -199,7 +223,7 @@ def cmd_start(message):
 
 
 # ---------------------------------------------------------------- NEWS: opinion helper
-def generate_opinions(uid, content, article_url=None):
+def generate_opinions(uid, content, article_url=None, article_title=None, article_desc=None):
     """Turn an article (forwarded, typed or pasted) into 3 opinion angles.
     Reused for the first go and for every regenerate."""
     bot.send_chat_action(uid, "typing")
@@ -209,7 +233,9 @@ def generate_opinions(uid, content, article_url=None):
         bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
         return
     get_state(uid).update(mode="opinion", options=options, image_url=None, draft=None,
-                          stage="choosing", article_url=article_url, source=content)
+                          stage="choosing", article_url=article_url,
+                          article_title=article_title, article_desc=article_desc,
+                          source=content)
     show_options(uid, "Here are some angles you could post:", options, "POV")
 
 
@@ -220,11 +246,11 @@ def on_forwarded_article(message):
     if not is_owner(uid):
         bot.reply_to(message, "This bot is private.")
         return
-    content, url = resolve_opinion_source(uid, message)
+    content, url, title, desc = resolve_opinion_source(uid, message)
     if not content:
         bot.reply_to(message, "Couldn't read any text or link from that — try forwarding the original post.")
         return
-    generate_opinions(uid, content, url)
+    generate_opinions(uid, content, url, title, desc)
 
 
 # ---------------------------------------------------------------- PHOTO flow
@@ -355,12 +381,12 @@ def on_text(message):
     else:
         # Any other text — a pasted link OR typed/pasted article text — auto-
         # generates 3 angles. A bare link gets the article fetched and read.
-        content, url = resolve_opinion_source(uid, message)
+        content, url, title, desc = resolve_opinion_source(uid, message)
         if not content or len(content.strip()) < 10:
             bot.reply_to(message, "Send me an article link (any site), or forward/paste the "
                                   "text, and I'll suggest 3 angles. Or send a photo to caption.")
         else:
-            generate_opinions(uid, content, url)
+            generate_opinions(uid, content, url, title, desc)
 
 
 if __name__ == "__main__":
