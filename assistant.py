@@ -110,22 +110,12 @@ def draft_keyboard():
     return kb
 
 def send_draft(uid):
-    """Show the draft as its OWN clean message (just the post text, nothing
-    else) so a long-press -> Copy grabs exactly the caption, then a separate
-    message with the how-to and the ✅ button."""
+    """Show the draft as ONE clean message — just the post text, with the ✅
+    button attached below it. No instruction words, so a long-press -> Copy
+    grabs exactly the post and nothing else to delete. (For opinion posts the
+    article link is still added automatically when she posts.)"""
     st = get_state(uid)
-    bot.send_message(uid, st["draft"])   # clean, copy-friendly — no extra text
-    link_note = "\n🔗 The article link will be added to the post automatically." \
-        if st.get("article_url") else ""
-    bot.send_message(
-        uid,
-        "👆 That's your draft.\n\n"
-        "✏️ To edit: copy it, tweak, and send it back (it replaces the draft) — "
-        "or just type a fresh version.\n"
-        "Tap ✅ when you're ready."
-        f"{link_note}",
-        reply_markup=draft_keyboard(),
-    )
+    bot.send_message(uid, st["draft"], reply_markup=draft_keyboard())
 
 def do_publish(uid, notify):
     """notify(text) sends feedback back to her. Shared by the button and /post."""
@@ -283,7 +273,6 @@ def on_text(message):
 
     elif stage == "editing":
         st["draft"] = message.text
-        bot.send_message(uid, "Updated ✅")
         send_draft(uid)
 
     else:
