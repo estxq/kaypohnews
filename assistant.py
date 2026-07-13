@@ -76,7 +76,7 @@ def extract_url(message):
     return None
 
 
-def fetch_article_meta(url, limit=4000):
+def fetch_article_meta(url, limit=2000):
     """Download an article and pull out its main text plus title/description.
     Text lets the AI react to a bare link; title/description feed the LinkedIn
     preview card. Returns None on any failure so callers can fall back."""
@@ -250,11 +250,22 @@ def generate_opinions(uid, content, article_url=None, article_title=None,
     """Turn an article (forwarded, typed or pasted) into 3 opinion angles.
     Reused for the first go and for every regenerate."""
     bot.send_chat_action(uid, "typing")
-    try:
-        options = ask_make_for_suggestions("opinion", content)
-    except Exception as e:
-        bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
-        return
+    # With long article text the model sometimes returns fewer than 3 angles;
+    # retry a couple of times so she reliably gets a full set without having to
+    # hit Regenerate. Keep the best (most-options) result.
+    options = []
+    for _ in range(3):
+        try:
+            got = ask_make_for_suggestions("opinion", content)
+        except Exception as e:
+            if not options:
+                bot.send_message(uid, f"Sorry, couldn't get suggestions: {e}")
+                return
+            break
+        if len(got) > len(options):
+            options = got
+        if len(options) >= 3:
+            break
     get_state(uid).update(mode="opinion", options=options, image_url=None, draft=None,
                           stage="choosing", article_url=article_url,
                           article_title=article_title, article_desc=article_desc,
