@@ -94,13 +94,19 @@ def show_options(uid, header, options, label):
     """Send the header, then each option as its OWN message with a bold
     "<label> N" title (e.g. POV 1) and its own pick button. Separate bubbles
     keep long, LinkedIn-length drafts easy to tell apart and to copy."""
-    bot.send_message(uid, f"<b>{html.escape(header, quote=False)}</b>", parse_mode="HTML")
+    n = len(options)
+    bot.send_message(
+        uid,
+        f"<b>{html.escape(header, quote=False)}</b>\n"
+        f"({n} to choose from — scroll down 👇)",
+        parse_mode="HTML",
+    )
     for i, o in enumerate(options):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(f"✍️ Use {label} {i + 1}", callback_data=f"pick:{i}"))
         bot.send_message(
             uid,
-            f"<b>{label} {i + 1}</b>\n\n{html.escape(o, quote=False)}",
+            f"<b>{label} {i + 1} of {n}</b>\n\n{html.escape(o, quote=False)}",
             reply_markup=kb,
             parse_mode="HTML",
         )
