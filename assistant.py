@@ -130,8 +130,8 @@ def ask_make_for_suggestions(mode, content):
     return r.json().get("options", [])
 
 def publish_to_linkedin(mode, text, image_url=None, link=None, link_title=None, link_desc=None):
-    """mode = 'text' (plain), 'image' (photo) or 'article' (link with preview
-    card). Returns Make's JSON response."""
+    """mode = 'text' (opinion; when link/title given, Make posts it as an Article
+    share with a preview card) or 'image' (photo). Returns Make's JSON response."""
     r = requests.post(MAKE_PUBLISH_URL,
                       json={"mode": mode, "text": text, "image_url": image_url,
                             "link": link, "link_title": link_title, "link_desc": link_desc},
@@ -189,14 +189,18 @@ def do_publish(uid, notify):
     if st.get("image_url"):
         publish_mode = "image"
     elif st.get("article_url"):
-        # Post as an article share so LinkedIn shows the preview card, instead
-        # of gluing an ugly shortened link onto the text.
-        publish_mode = "article"
+        # Opinion with a source link. mode="text" routes to the LinkedIn module
+        # configured as an Article share (URL/Title/Description), so LinkedIn
+        # renders the preview card instead of a bare shortened link.
+        publish_mode = "text"
         link = st["article_url"]
         link_title = (st.get("article_title") or "Read the article")[:400]
         link_desc = st.get("article_desc")
     else:
-        publish_mode = "text"
+        # No source link -> LinkedIn can't build a preview card. Ask for one.
+        notify("This post has no source article link, so it can't post with a preview card. "
+               "Forward the article or send its link, then try again.")
+        return
     notify("Posting to LinkedIn…")
     try:
         result = publish_to_linkedin(publish_mode, text, st.get("image_url"),
