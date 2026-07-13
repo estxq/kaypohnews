@@ -75,6 +75,40 @@ def extract_url(message):
     return None
 
 
+def fetch_article_text(url, limit=4000):
+    """Download an article and pull out its main text, so she can send just a
+    link (any site, not only the channel) and still get opinion angles. Returns
+    None on any failure so the caller can fall back gracefully."""
+    try:
+        import trafilatura
+    except ImportError:
+        return None
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return None
+        text = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+        return text.strip()[:limit] if text else None
+    except Exception:
+        return None
+
+
+def resolve_opinion_source(uid, message):
+    """Decide what to comment on: normally her message text, but if she basically
+    just sent a link, fetch the linked article's text so the AI has real material.
+    Returns (content, article_url)."""
+    url = extract_url(message)
+    text = (message.text or message.caption or "").strip()
+    remainder = text.replace(url, "").strip() if url else text
+    if url and len(remainder) < 80:
+        bot.send_message(uid, "🔗 Reading the article…")
+        fetched = fetch_article_text(url)
+        if fetched:
+            return fetched, url
+        bot.send_message(uid, "(Couldn't read that link — I'll use what you sent instead.)")
+    return text, url
+
+
 # ---------------------------------------------------------------- Make helpers
 def ask_make_for_suggestions(mode, content):
     """mode = 'opinion' or 'caption'. Returns a list of option strings."""
@@ -186,11 +220,11 @@ def on_forwarded_article(message):
     if not is_owner(uid):
         bot.reply_to(message, "This bot is private.")
         return
-    article = message.text or message.caption or ""
-    if not article:
-        bot.reply_to(message, "Couldn't read any text from that — try forwarding the original post.")
+    content, url = resolve_opinion_source(uid, message)
+    if not content:
+        bot.reply_to(message, "Couldn't read any text or link from that — try forwarding the original post.")
         return
-    generate_opinions(uid, article, extract_url(message))
+    generate_opinions(uid, content, url)
 
 
 # ---------------------------------------------------------------- PHOTO flow
@@ -319,13 +353,14 @@ def on_text(message):
         send_draft(uid)
 
     else:
-        # Any other text (typed or pasted article/link) auto-generates 3 angles.
-        text = (message.text or "").strip()
-        if len(text) < 10:
-            bot.reply_to(message, "Send me an article — forward it or paste the text — "
-                                  "and I'll suggest 3 angles. Or send a photo to caption.")
+        # Any other text — a pasted link OR typed/pasted article text — auto-
+        # generates 3 angles. A bare link gets the article fetched and read.
+        content, url = resolve_opinion_source(uid, message)
+        if not content or len(content.strip()) < 10:
+            bot.reply_to(message, "Send me an article link (any site), or forward/paste the "
+                                  "text, and I'll suggest 3 angles. Or send a photo to caption.")
         else:
-            generate_opinions(uid, message.text, extract_url(message))
+            generate_opinions(uid, content, url)
 
 
 if __name__ == "__main__":
