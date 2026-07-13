@@ -109,6 +109,24 @@ def draft_keyboard():
     kb.add(types.InlineKeyboardButton("✅ Post to LinkedIn", callback_data="do_post"))
     return kb
 
+def send_draft(uid):
+    """Show the draft as its OWN clean message (just the post text, nothing
+    else) so a long-press -> Copy grabs exactly the caption, then a separate
+    message with the how-to and the ✅ button."""
+    st = get_state(uid)
+    bot.send_message(uid, st["draft"])   # clean, copy-friendly — no extra text
+    link_note = "\n🔗 The article link will be added to the post automatically." \
+        if st.get("article_url") else ""
+    bot.send_message(
+        uid,
+        "👆 That's your draft.\n\n"
+        "✏️ To edit: copy it, tweak, and send it back (it replaces the draft) — "
+        "or just type a fresh version.\n"
+        "Tap ✅ when you're ready."
+        f"{link_note}",
+        reply_markup=draft_keyboard(),
+    )
+
 def do_publish(uid, notify):
     """notify(text) sends feedback back to her. Shared by the button and /post."""
     st = get_state(uid)
@@ -208,16 +226,7 @@ def on_pick(call):
     st["draft"] = options[idx]
     st["stage"] = "editing"
     bot.answer_callback_query(call.id, "Loaded into your draft.")
-    link_note = "\n🔗 The article link will be added to the post automatically." \
-        if st.get("article_url") else ""
-    bot.send_message(
-        uid,
-        "Here's your draft:\n\n"
-        f"{st['draft']}\n\n"
-        "✏️ Type any edits to replace it, then tap ✅ when ready."
-        f"{link_note}",
-        reply_markup=draft_keyboard(),
-    )
+    send_draft(uid)
 
 
 # ---------------------------------------------------------------- ✅ Post to LinkedIn button
@@ -274,8 +283,8 @@ def on_text(message):
 
     elif stage == "editing":
         st["draft"] = message.text
-        bot.reply_to(message, "Updated your draft. Tap ✅ when ready, or keep editing.",
-                     reply_markup=draft_keyboard())
+        bot.send_message(uid, "Updated ✅")
+        send_draft(uid)
 
     else:
         bot.reply_to(message, "Forward me a news article to comment on, or send me a photo to caption.")
