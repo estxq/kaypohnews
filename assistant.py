@@ -19,18 +19,28 @@ Make.com does the AI suggestions and the LinkedIn posting (two webhooks).
 Setup
   pip install pyTelegramBotAPI requests
   export TELEGRAM_BOT_TOKEN="same token as news_bot.py"
-  export MAKE_SUGGEST_URL="Make webhook that returns {'options':[...]}"
-  export MAKE_PUBLISH_URL="Make webhook that posts to LinkedIn"
+  export MAKE_SUGGEST_URL="Make webhook that returns {'options':[...]} - SHARED by everyone"
+  export MAKE_PUBLISH_URL="default/fallback publish webhook (Lilin's)"
   export OWNER_TELEGRAM_ID="allowed numeric Telegram user id(s), comma-separated
                             e.g. 111111111 or 111111111,222222222 (her + tester)"
+  export PUBLISH_ROUTES="optional per-person publish webhooks, for supporting more
+                         than one LinkedIn account on the same bot.
+                         Format: telegram_id:webhook_url, comma-separated for more people.
+                         e.g. 222222222:https://hook.eu1.make.com/xxxxx
+                         Anyone whose id is NOT listed here falls back to MAKE_PUBLISH_URL."
   python assistant.py
 
 Both flows start with her messaging the bot directly (forwarding a post, or
 sending a photo), so Telegram always allows the reply - no need to press
 Start first, though /start still gives a quick how-to.
 
-SECURITY: OWNER_TELEGRAM_ID locks every flow to her user id only, since the
-Make webhooks are wired to one specific LinkedIn account.
+MULTI-PERSON SUPPORT: the Suggest webhook (MAKE_SUGGEST_URL) is generic and
+shared by everyone - it never touches anyone's LinkedIn. Only publishing is
+per-person: each person needs their OWN Make "publish" scenario (cloned, with
+their own LinkedIn connection) and their own entry in PUBLISH_ROUTES, so their
+posts go to THEIR account rather than falling back to MAKE_PUBLISH_URL.
+
+SECURITY: OWNER_TELEGRAM_ID locks every flow to only the listed user ids.
 """
 
 import os
@@ -40,10 +50,24 @@ import telebot
 from telebot import types
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # SAME token as news_bot.py
-MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options
-MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # posts to LinkedIn
+MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options - shared by everyone
+MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # default/fallback publish webhook
 # One or more allowed user ids, comma-separated (e.g. "111,222" for her + a tester).
 OWNER_TELEGRAM_IDS = {int(x) for x in os.environ["OWNER_TELEGRAM_ID"].split(",") if x.strip()}
+
+# Optional per-person publish webhooks: "id:url,id:url,...". Anyone not listed
+# here uses MAKE_PUBLISH_URL instead. This is how multiple people can share the
+# same bot while each posting to their own LinkedIn account.
+PUBLISH_ROUTES = {}
+for _pair in os.environ.get("PUBLISH_ROUTES", "").split(","):
+    _pair = _pair.strip()
+    if not _pair:
+        continue
+    _uid_str, _url = _pair.split(":", 1)
+    PUBLISH_ROUTES[int(_uid_str.strip())] = _url.strip()
+
+def publish_url_for(uid):
+    return PUBLISH_ROUTES.get(uid, MAKE_PUBLISH_URL)
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
@@ -143,11 +167,13 @@ def ask_make_for_suggestions(mode, content):
     r.raise_for_status()
     return r.json().get("options", [])
 
-def publish_to_linkedin(mode, text, image_url=None, link=None, link_title=None,
+def publish_to_linkedin(publish_url, mode, text, image_url=None, link=None, link_title=None,
                         link_desc=None, link_image=None):
     """mode = 'text' (opinion; when link/title given, Make posts it as an Article
-    share with a preview card) or 'image' (photo). Returns Make's JSON response."""
-    r = requests.post(MAKE_PUBLISH_URL,
+    share with a preview card) or 'image' (photo). publish_url is THIS user's own
+    publish webhook (see publish_url_for), so each person's posts go to their own
+    LinkedIn. Returns Make's JSON response."""
+    r = requests.post(publish_url,
                       json={"mode": mode, "text": text, "image_url": image_url,
                             "link": link, "link_title": link_title, "link_desc": link_desc,
                             "link_image": link_image},
@@ -234,7 +260,7 @@ def do_publish(uid, notify):
         return
     notify("Posting to LinkedIn…")
     try:
-        result = publish_to_linkedin(publish_mode, text, st.get("image_url"),
+        result = publish_to_linkedin(publish_url_for(uid), publish_mode, text, st.get("image_url"),
                                      link, link_title, link_desc, link_image)
     except Exception as e:
         bot.send_message(uid, f"Posting failed: {e}")
