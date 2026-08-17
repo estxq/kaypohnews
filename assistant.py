@@ -37,8 +37,17 @@ Start first, though /start still gives a quick how-to.
 MULTI-PERSON SUPPORT: the Suggest webhook (MAKE_SUGGEST_URL) is generic and
 shared by everyone - it never touches anyone's LinkedIn. Only publishing is
 per-person: each person needs their OWN Make "publish" scenario (cloned, with
-their own LinkedIn connection) and their own entry in PUBLISH_ROUTES, so their
-posts go to THEIR account rather than falling back to MAKE_PUBLISH_URL.
+their own LinkedIn connection). Where THAT routing decision lives is flexible:
+
+  - MAKE_LOOKUP_URL (recommended): a small Make scenario backed by a Data
+    Store (telegram_id -> webhook_url). Onboarding a new person is then a
+    Make-only task (add their connection + clone their scenario + add one
+    Data Store row) - nobody ever needs to touch this VM again. See the
+    onboarding tutorial for the exact Make setup.
+  - PUBLISH_ROUTES (fallback / no Make lookup set up yet): a static list
+    baked into this VM's config, "id:url,id:url,...".
+
+Anyone matched by neither falls back to MAKE_PUBLISH_URL (Lilin's).
 
 SECURITY: OWNER_TELEGRAM_ID locks every flow to only the listed user ids.
 """
@@ -52,12 +61,16 @@ from telebot import types
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # SAME token as news_bot.py
 MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options - shared by everyone
 MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # default/fallback publish webhook
+# Optional: a Make scenario that looks up {telegram_id} -> {"url": ...} in a
+# Data Store. When set, new people can be onboarded entirely inside Make - no
+# VM edits needed. See MULTI-PERSON SUPPORT above.
+MAKE_LOOKUP_URL    = os.environ.get("MAKE_LOOKUP_URL")
 # One or more allowed user ids, comma-separated (e.g. "111,222" for her + a tester).
 OWNER_TELEGRAM_IDS = {int(x) for x in os.environ["OWNER_TELEGRAM_ID"].split(",") if x.strip()}
 
-# Optional per-person publish webhooks: "id:url,id:url,...". Anyone not listed
-# here uses MAKE_PUBLISH_URL instead. This is how multiple people can share the
-# same bot while each posting to their own LinkedIn account.
+# Optional per-person publish webhooks: "id:url,id:url,...". Only used as a
+# fallback when MAKE_LOOKUP_URL isn't set (or the lookup misses). Anyone not
+# listed here uses MAKE_PUBLISH_URL instead.
 PUBLISH_ROUTES = {}
 for _pair in os.environ.get("PUBLISH_ROUTES", "").split(","):
     _pair = _pair.strip()
@@ -67,6 +80,18 @@ for _pair in os.environ.get("PUBLISH_ROUTES", "").split(","):
     PUBLISH_ROUTES[int(_uid_str.strip())] = _url.strip()
 
 def publish_url_for(uid):
+    """Where should THIS user's posts go? Tries the Make Data Store lookup
+    first (self-serve onboarding, no VM edits), then the static VM-config
+    fallback, then Lilin's default."""
+    if MAKE_LOOKUP_URL:
+        try:
+            r = requests.post(MAKE_LOOKUP_URL, json={"telegram_id": uid}, timeout=15)
+            r.raise_for_status()
+            url = (r.json() or {}).get("url")
+            if url:
+                return url
+        except Exception:
+            pass  # lookup unavailable/miss -> fall through to static config
     return PUBLISH_ROUTES.get(uid, MAKE_PUBLISH_URL)
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
