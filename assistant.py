@@ -21,38 +21,36 @@ Setup
   export TELEGRAM_BOT_TOKEN="same token as news_bot.py"
   export MAKE_SUGGEST_URL="Make webhook that returns {'options':[...]} - SHARED by everyone"
   export MAKE_PUBLISH_URL="default/fallback publish webhook (Lilin's)"
-  export OWNER_TELEGRAM_ID="allowed numeric Telegram user id(s), comma-separated
-                            e.g. 111111111 or 111111111,222222222 (her + tester)"
-  export PUBLISH_ROUTES="optional per-person publish webhooks, for supporting more
-                         than one LinkedIn account on the same bot.
-                         Format: telegram_id:webhook_url, comma-separated for more people.
-                         e.g. 222222222:https://hook.eu1.make.com/xxxxx
-                         Anyone whose id is NOT listed here falls back to MAKE_PUBLISH_URL."
+  export OWNER_TELEGRAM_ID="numeric Telegram id(s) with standing access even without a
+                            Data Store row, comma-separated. Normally just Lilin + you
+                            (the admin) - e.g. 111111111,222222222"
+  export MAKE_LOOKUP_URL="Make scenario that looks up {telegram_id} -> {'url': ...} in
+                          the publish_routes Data Store (see onboarding tutorial)"
+  export PUBLISH_ROUTES="optional legacy fallback, only used if MAKE_LOOKUP_URL is unset
+                         or errors. Format: telegram_id:webhook_url, comma-separated."
   python assistant.py
 
 Both flows start with her messaging the bot directly (forwarding a post, or
 sending a photo), so Telegram always allows the reply - no need to press
 Start first, though /start still gives a quick how-to.
 
-MULTI-PERSON SUPPORT: the Suggest webhook (MAKE_SUGGEST_URL) is generic and
-shared by everyone - it never touches anyone's LinkedIn. Only publishing is
-per-person: each person needs their OWN Make "publish" scenario (cloned, with
-their own LinkedIn connection). Where THAT routing decision lives is flexible:
+MULTI-PERSON SUPPORT / TRULY SELF-SERVE ONBOARDING: the Suggest webhook
+(MAKE_SUGGEST_URL) is generic and shared by everyone - it never touches
+anyone's LinkedIn. Publishing is per-person, decided by the Make Data Store
+(publish_routes, looked up via MAKE_LOOKUP_URL): being registered there is
+BOTH the access check AND the routing decision. Onboarding a new person is
+therefore a pure Make.com task - connect their LinkedIn, clone their publish
+scenario, add one row to publish_routes - nobody ever needs to touch this VM,
+not even once. OWNER_TELEGRAM_ID is now only a small standing exception list
+(Lilin, who has no Data Store row and uses MAKE_PUBLISH_URL by default; and
+the admin). See the onboarding tutorial for the exact Make setup.
 
-  - MAKE_LOOKUP_URL (recommended): a small Make scenario backed by a Data
-    Store (telegram_id -> webhook_url). Onboarding a new person is then a
-    Make-only task (add their connection + clone their scenario + add one
-    Data Store row) - nobody ever needs to touch this VM again. See the
-    onboarding tutorial for the exact Make setup.
-  - PUBLISH_ROUTES (fallback / no Make lookup set up yet): a static list
-    baked into this VM's config, "id:url,id:url,...".
-
-Anyone matched by neither falls back to MAKE_PUBLISH_URL (Lilin's).
-
-SECURITY: OWNER_TELEGRAM_ID locks every flow to only the listed user ids.
+SECURITY: every flow requires EITHER a Data Store row (via MAKE_LOOKUP_URL)
+OR membership in OWNER_TELEGRAM_ID.
 """
 
 import os
+import time
 import html
 import requests
 import telebot
@@ -60,17 +58,16 @@ from telebot import types
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # SAME token as news_bot.py
 MAKE_SUGGEST_URL   = os.environ["MAKE_SUGGEST_URL"]     # returns AI options - shared by everyone
-MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # default/fallback publish webhook
-# Optional: a Make scenario that looks up {telegram_id} -> {"url": ...} in a
-# Data Store. When set, new people can be onboarded entirely inside Make - no
-# VM edits needed. See MULTI-PERSON SUPPORT above.
+MAKE_PUBLISH_URL   = os.environ["MAKE_PUBLISH_URL"]     # default/fallback publish webhook (Lilin's)
+# Optional: a Make scenario that looks up {telegram_id} -> {"url": ...} in the
+# publish_routes Data Store. Being found there grants BOTH access and routing,
+# so new people never need a VM edit. See MULTI-PERSON SUPPORT above.
 MAKE_LOOKUP_URL    = os.environ.get("MAKE_LOOKUP_URL")
-# One or more allowed user ids, comma-separated (e.g. "111,222" for her + a tester).
+# Small standing exception list (Lilin + admin) who don't need a Data Store row.
 OWNER_TELEGRAM_IDS = {int(x) for x in os.environ["OWNER_TELEGRAM_ID"].split(",") if x.strip()}
 
-# Optional per-person publish webhooks: "id:url,id:url,...". Only used as a
-# fallback when MAKE_LOOKUP_URL isn't set (or the lookup misses). Anyone not
-# listed here uses MAKE_PUBLISH_URL instead.
+# Legacy fallback only: "id:url,id:url,...", used if MAKE_LOOKUP_URL is unset
+# or errors/misses. New people should go in the Data Store, not here.
 PUBLISH_ROUTES = {}
 for _pair in os.environ.get("PUBLISH_ROUTES", "").split(","):
     _pair = _pair.strip()
@@ -79,25 +76,43 @@ for _pair in os.environ.get("PUBLISH_ROUTES", "").split(","):
     _uid_str, _url = _pair.split(":", 1)
     PUBLISH_ROUTES[int(_uid_str.strip())] = _url.strip()
 
+# Cache Data Store lookups briefly so every single bot interaction (several
+# handlers may check per message) doesn't each hit Make over the network, while
+# still picking up newly-added people within a few minutes, no restart needed.
+_lookup_cache = {}   # uid -> (url_or_None, cached_at)
+_LOOKUP_CACHE_TTL = 300   # seconds
+
+def _data_store_lookup(uid):
+    """Returns this person's publish webhook URL if they have a row in the
+    Make Data Store, else None. This single check is both the security gate
+    and the routing decision for anyone who isn't in OWNER_TELEGRAM_ID."""
+    if not MAKE_LOOKUP_URL:
+        return None
+    now = time.time()
+    cached = _lookup_cache.get(uid)
+    if cached and now - cached[1] < _LOOKUP_CACHE_TTL:
+        return cached[0]
+    url = None
+    try:
+        r = requests.post(MAKE_LOOKUP_URL, json={"telegram_id": uid}, timeout=15)
+        r.raise_for_status()
+        url = (r.json() or {}).get("url") or None
+    except Exception:
+        url = None
+    _lookup_cache[uid] = (url, now)
+    return url
+
 def publish_url_for(uid):
-    """Where should THIS user's posts go? Tries the Make Data Store lookup
-    first (self-serve onboarding, no VM edits), then the static VM-config
-    fallback, then Lilin's default."""
-    if MAKE_LOOKUP_URL:
-        try:
-            r = requests.post(MAKE_LOOKUP_URL, json={"telegram_id": uid}, timeout=15)
-            r.raise_for_status()
-            url = (r.json() or {}).get("url")
-            if url:
-                return url
-        except Exception:
-            pass  # lookup unavailable/miss -> fall through to static config
-    return PUBLISH_ROUTES.get(uid, MAKE_PUBLISH_URL)
+    """Where should THIS user's posts go? Data Store row first (self-serve),
+    then the legacy static fallback, then Lilin's default."""
+    return _data_store_lookup(uid) or PUBLISH_ROUTES.get(uid, MAKE_PUBLISH_URL)
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 def is_owner(uid):
-    return uid in OWNER_TELEGRAM_IDS
+    """Allowed if in the small standing exception list, OR registered in the
+    Data Store - so a brand-new person never needs a VM edit to get access."""
+    return uid in OWNER_TELEGRAM_IDS or _data_store_lookup(uid) is not None
 
 # State keyed by user id (same as their private chat id).
 STATE = {}   # user_id -> dict(stage, draft, options, image_url, mode, article_url)
