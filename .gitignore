@@ -1,0 +1,6 @@
+# local runtime data - never commit
+data/
+__pycache__/
+*.pyc
+venv/
+.venv/
