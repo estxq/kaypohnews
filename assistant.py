@@ -393,7 +393,8 @@ HELP_TEXT = (
     "posts at once and tag each with a category (Finance, Lifestyle…).\n"
     "• /schedule — pick your weekly posting days and times (10 AM–10 PM). At each "
     "time I post the next one and alternate the categories.\n"
-    "• /queue — see what's waiting and what goes out next.\n\n"
+    "• /queue — see what's waiting and what goes out next. Tap “See all / edit” to read, "
+    "reword, re-categorise or delete any queued post.\n\n"
     "💬 You can also just talk to me: “schedule this for Friday 7pm”, “make it "
     "shorter”, “what's in my queue?”, “post about CPF changes”."
 )
@@ -756,6 +757,8 @@ def handle_category_name(uid, text):
         start_bulk_mode(uid, name)
     elif pending == "pin":
         finish_pin(uid, name)
+    elif pending == "move":
+        do_move(uid, name)
 
 
 def _category_from_callback(call, prefix):
@@ -1047,7 +1050,7 @@ def send_queue_view(uid):
     lines += ["", describe_next(uid)]
     if upcoming:
         kb.row(btn("▶ Post next now", "qnow"))
-    kb.row(btn("➕ Add more", "badd"))
+    kb.row(btn("📋 See all / edit", "qlist:0"), btn("➕ Add more", "badd"))
     bot.send_message(uid, "\n".join(lines), reply_markup=kb)
 
 
@@ -1100,6 +1103,226 @@ def on_queue_retry(call):
     bot.answer_callback_query(call.id, "Trying again…")
     ok, detail = post_queue_item(db.get_item(item["id"]))
     announce_result(item, ok, detail, "retry")
+
+
+# ---------------------------------------------------------------- manage the queue
+# See every waiting post (5 per page), open one to read it in full, then edit the
+# wording, move it to another category, or delete it.
+QUEUE_PAGE = 5
+
+
+def queue_order(uid):
+    """Everything waiting: rotation posts in the order they will go out, then pinned ones."""
+    return db.upcoming(uid, 100000) + db.list_queued(uid, pinned=True)
+
+
+def render_queue_list(uid, page):
+    items = queue_order(uid)
+    if not items:
+        return None, None, 0
+    pages = (len(items) + QUEUE_PAGE - 1) // QUEUE_PAGE
+    page = max(0, min(page, pages - 1))
+    lines = [f"📋 Your queue - {len(items)} posts (page {page + 1} of {pages})",
+             "Tap a number to read, edit or delete that post.", ""]
+    row = []
+    for number, it in enumerate(items[page * QUEUE_PAGE:(page + 1) * QUEUE_PAGE],
+                                start=page * QUEUE_PAGE + 1):
+        tag = (f"📌 {fmt_dt(local_from_utc_str(it['scheduled_for']))}" if it["scheduled_for"]
+               else it["category"])
+        lines.append(f"{number}. {tag} - {one_line(it['text'], 60)}"
+                     + ("  📷" if it["photo_file_id"] else ""))
+        row.append(btn(str(number), f"qv:{it['id']}"))
+    kb = types.InlineKeyboardMarkup()
+    kb.row(*row)
+    nav = []
+    if page > 0:
+        nav.append(btn("◀ Previous", f"qlist:{page - 1}"))
+    if page < pages - 1:
+        nav.append(btn("Next ▶", f"qlist:{page + 1}"))
+    if nav:
+        kb.row(*nav)
+    return "\n".join(lines), kb, page
+
+
+def send_queue_list(uid, page=0, edit_message=None):
+    text, kb, _ = render_queue_list(uid, page)
+    if text is None:
+        bot.send_message(uid, "Your queue is empty - /add to feed me posts.")
+        return
+    if edit_message is not None:
+        try:
+            bot.edit_message_text(text, edit_message.chat.id, edit_message.message_id, reply_markup=kb)
+            return
+        except Exception:
+            pass                       # fall back to a fresh message
+    bot.send_message(uid, text, reply_markup=kb)
+
+
+def leave_queue_edit(uid):
+    """If she was in the middle of typing a replacement, drop back to where she was."""
+    st = get_state(uid)
+    if st.get("stage") == "editing_queue_item":
+        st["stage"] = st.pop("return_stage", None)
+    st.pop("edit_item", None)
+
+
+def _my_queued_item(call):
+    """The item a button points at, but only if it is hers and still waiting."""
+    uid = call.from_user.id
+    item = db.get_item(int(call.data.split(":", 1)[1]))
+    if not item or item["uid"] != uid or item["status"] != "queued":
+        bot.answer_callback_query(call.id, "That post isn't in your queue any more.")
+        return None
+    return item
+
+
+def send_item_card(uid, item_id):
+    item = db.get_item(item_id)
+    if not item or item["uid"] != uid or item["status"] != "queued":
+        bot.send_message(uid, "That post isn't in your queue any more.")
+        return
+    order = queue_order(uid)
+    position = next((i for i, it in enumerate(order) if it["id"] == item_id), 0)
+    if item["scheduled_for"]:
+        where = f"📌 Pinned for {fmt_dt(local_from_utc_str(item['scheduled_for']))} ({TZ_LABEL})"
+    else:
+        where = f"#{position + 1} in line"
+    extras = (" · 📷 photo" if item["photo_file_id"] else "") + (" · 🔗 link card" if item["link"] else "")
+    if item["photo_file_id"]:
+        try:
+            bot.send_photo(uid, item["photo_file_id"])
+        except Exception:
+            log.warning("could not preview photo for item %s", item_id)
+    kb = types.InlineKeyboardMarkup()
+    kb.row(btn("✏️ Edit text", f"qe:{item_id}"), btn("🏷 Change category", f"qk:{item_id}"))
+    kb.row(btn("🗑 Delete", f"qx:{item_id}"), btn("⬅ Back to list", f"qlist:{position // QUEUE_PAGE}"))
+    bot.send_message(uid, f"{item['category']} · {where}{extras}\n\n{item['text']}"[:4000], reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qlist:"))
+def on_queue_list(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    leave_queue_edit(uid)
+    bot.answer_callback_query(call.id)
+    # the same message is reused for paging; from the summary it opens a new one
+    send_queue_list(uid, int(call.data[6:]),
+                    edit_message=call.message if call.message.text and
+                    call.message.text.startswith("📋") else None)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qv:"))
+def on_item_view(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    leave_queue_edit(uid)
+    item = _my_queued_item(call)
+    if item:
+        bot.answer_callback_query(call.id)
+        send_item_card(uid, item["id"])
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qe:"))
+def on_item_edit(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    item = _my_queued_item(call)
+    if not item:
+        return
+    st = get_state(uid)
+    if st.get("stage") != "editing_queue_item":
+        st["return_stage"] = st.get("stage")
+    st["stage"] = "editing_queue_item"
+    st["edit_item"] = item["id"]
+    bot.answer_callback_query(call.id)
+    bot.send_message(uid, "✏️ Send me the new text for this post - it replaces the old wording. "
+                          "(The category, photo and link stay as they are. Type cancel to keep it as it is.)")
+
+
+def handle_item_edit_text(uid, text):
+    st = get_state(uid)
+    item_id = st.get("edit_item")
+    if text.strip().lower() == "cancel":
+        leave_queue_edit(uid)
+        bot.send_message(uid, "No problem - left as it was.")
+        return
+    if len(text) < 5 or len(text) > 3000:
+        bot.send_message(uid, "A post needs to be between 5 and 3,000 characters (LinkedIn's limit). "
+                              "Try again, or type cancel.")
+        return
+    ok = db.update_item(uid, item_id, text=text)
+    leave_queue_edit(uid)
+    if ok:
+        bot.send_message(uid, "✅ Updated.")
+        send_item_card(uid, item_id)
+    else:
+        bot.send_message(uid, "That post isn't in your queue any more.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qk:"))
+def on_item_move(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    leave_queue_edit(uid)
+    item = _my_queued_item(call)
+    if not item:
+        return
+    get_state(uid)["move_item"] = item["id"]
+    bot.answer_callback_query(call.id)
+    ask_category(uid, f"Move this post out of {item['category']} - to which category?", "qm")
+
+
+def do_move(uid, category):
+    item_id = get_state(uid).pop("move_item", None)
+    if item_id and db.update_item(uid, item_id, category=category):
+        item = db.get_item(item_id)
+        bot.send_message(uid, f"✅ Moved to {item['category']}.")
+        send_item_card(uid, item_id)
+    else:
+        bot.send_message(uid, "I couldn't move that one - it may have been posted or removed.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qm:"))
+def on_item_move_pick(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    kind, name = _category_from_callback(call, "qm")
+    bot.answer_callback_query(call.id)
+    if kind == "new":
+        ask_new_category(uid, "move")
+    elif kind == "gone":
+        bot.send_message(uid, "That list expired - open the post again and tap 🏷 Change category.")
+    else:
+        do_move(uid, name)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qx:"))
+def on_item_delete_from_card(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    leave_queue_edit(uid)
+    item = _my_queued_item(call)
+    if not item:
+        return
+    db.delete_item(uid, item["id"])
+    bot.answer_callback_query(call.id, "Deleted 🗑")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    send_queue_list(uid, 0)
 
 
 # ---------------------------------------------------------------- /schedule
@@ -1603,6 +1826,11 @@ def on_text(message):
     # she was asked to name a new category
     if stage == "awaiting_category_name":
         handle_category_name(uid, text)
+        return
+
+    # she tapped ✏️ Edit text on a queued post: this message is the new wording
+    if stage == "editing_queue_item":
+        handle_item_edit_text(uid, text)
         return
 
     # feeding the queue: every message is a finished post

@@ -251,6 +251,23 @@ class Store:
                 (item_id, uid))
             return cur.rowcount == 1
 
+    def update_item(self, uid, item_id, text=None, category=None):
+        """Change a still-waiting post's wording and/or category. Only her own, only
+        while it is queued (never one that is mid-post or already posted)."""
+        sets, args = [], []
+        if text is not None:
+            sets.append("text=?")
+            args.append(text)
+        if category is not None:
+            sets.append("category=?")
+            args.append(self.canonical_category(uid, category))
+        if not sets:
+            return False
+        with self._conn() as c:
+            cur = c.execute(f"UPDATE queue SET {', '.join(sets)} "
+                            f"WHERE id=? AND uid=? AND status='queued'", (*args, item_id, uid))
+            return cur.rowcount == 1
+
     def claim(self, item_id):
         """Atomically take an item so it can never be posted twice."""
         with self._conn() as c:
