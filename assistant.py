@@ -319,8 +319,9 @@ def show_options(uid, header, options, label):
 
 def draft_keyboard():
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✅ Post to LinkedIn", callback_data="do_post"))
-    kb.add(types.InlineKeyboardButton("🗓 Add to queue (post it later)", callback_data="qadd"))
+    kb.add(types.InlineKeyboardButton("✅ Post now", callback_data="do_post"))
+    kb.add(types.InlineKeyboardButton("📌 Pick a day & time", callback_data="pdt"))
+    kb.add(types.InlineKeyboardButton("🗓 Add to my queue (auto-posts in my schedule)", callback_data="qadd"))
     return kb
 
 def send_draft(uid):
@@ -385,8 +386,10 @@ HELP_TEXT = (
     "• Forward me a news article (or paste a link) and I'll suggest 3 angles.\n"
     "• Or send a photo and tell me what happened, and I'll write the caption.\n"
     "• Pick one, edit it by sending your version, then tap ✅ Post to LinkedIn.\n\n"
-    "🗓 Post it later, automatically\n"
-    "• Tap “Add to queue” under any draft, or use /add to feed me lots of finished "
+    "🗓 Post now, or later - your choice, every time\n"
+    "• Under every draft: ✅ Post now, 📌 Pick a day & time (just this one post), or "
+    "“Add to my queue” to let your weekly schedule post it.\n"
+    "• Or use /add to feed me lots of finished "
     "posts at once and tag each with a category (Finance, Lifestyle…).\n"
     "• /schedule — pick your weekly posting days and times (10 AM–10 PM). At each "
     "time I post the next one and alternate the categories.\n"
@@ -751,6 +754,8 @@ def handle_category_name(uid, text):
         queue_current_draft(uid, name)
     elif pending == "bulk":
         start_bulk_mode(uid, name)
+    elif pending == "pin":
+        finish_pin(uid, name)
 
 
 def _category_from_callback(call, prefix):
@@ -894,6 +899,118 @@ def on_bulk_done(call):
     finish_bulk(uid)
 
 
+# ---------------------------------------------------------------- one post, one date + time
+# "📌 Pick a day & time": day -> time -> category -> pinned. It posts by itself at
+# that moment and stays out of the weekly rotation.
+def pin_days_keyboard():
+    now = datetime.now(TZ)
+    buttons = []
+    for offset in range(0, 8):
+        if offset == 0 and now.strftime("%H:%M") >= "21:58":
+            continue                          # nothing left to pick today
+        day = now + timedelta(days=offset)
+        label = ("Today" if offset == 0 else "Tomorrow" if offset == 1
+                 else f"{store_mod.DAY_LABELS[day.weekday()]} {day.day} {day.strftime('%b')}")
+        buttons.append(btn(label, f"pd:{offset}"))
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(*buttons)
+    return kb
+
+
+def finish_pin(uid, category):
+    st = get_state(uid)
+    when = st.get("pin_when")
+    if not when or not st.get("draft"):
+        bot.send_message(uid, "I lost track of that - tap 📌 Pick a day & time on your draft again.")
+        return
+    if when <= datetime.now(TZ) + timedelta(minutes=1):
+        st.pop("pin_when", None)
+        bot.send_message(uid, "That time passed while you were choosing. Pick another day and time:",
+                         reply_markup=pin_days_keyboard())
+        return
+    queue_current_draft(uid, category, scheduled_for=when.astimezone(timezone.utc).replace(tzinfo=None))
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "pdt")
+def on_pin_start(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    if not get_state(uid).get("draft"):
+        bot.answer_callback_query(call.id, "There's no draft to schedule any more.")
+        return
+    bot.answer_callback_query(call.id)
+    bot.send_message(uid, f"Which day should it go out? ({TZ_LABEL}, 10 AM - 10 PM)",
+                     reply_markup=pin_days_keyboard())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pd:"))
+def on_pin_day(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    day = (datetime.now(TZ) + timedelta(days=int(call.data[3:]))).date()
+    get_state(uid)["pin_date"] = day.isoformat()
+    bot.answer_callback_query(call.id)
+    bot.send_message(uid, f"{fmt_dt(datetime(day.year, day.month, day.day, 10, 0, tzinfo=TZ)).rsplit(',', 1)[0]} - "
+                          f"what time?\n(Need something like 3:20 PM? Just tell me in chat.)",
+                     reply_markup=time_keyboard(prefix="pt"))
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pth:"))
+def on_pin_time_grid(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                      reply_markup=time_keyboard(half=call.data == "pth:30", prefix="pt"))
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pt:"))
+def on_pin_time(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    st = get_state(uid)
+    raw = call.data[3:]
+    hhmm = f"{raw[:2]}:{raw[2:]}"
+    if not st.get("pin_date") or not st.get("draft"):
+        bot.answer_callback_query(call.id, "Tap 📌 Pick a day & time on your draft first.")
+        return
+    day = datetime.strptime(st["pin_date"], "%Y-%m-%d")
+    when = datetime(day.year, day.month, day.day, int(hhmm[:2]), int(hhmm[3:]), tzinfo=TZ)
+    if when <= datetime.now(TZ) + timedelta(minutes=2):
+        bot.answer_callback_query(call.id, "That time has already passed - pick a later one.")
+        return
+    st["pin_when"] = when
+    bot.answer_callback_query(call.id)
+    ask_category(uid, f"📌 {fmt_dt(when)} ({TZ_LABEL}). Which category is this post?", "pc")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pc:"))
+def on_pin_category(call):
+    uid = call.from_user.id
+    if not is_owner(uid):
+        bot.answer_callback_query(call.id, "This bot is private.")
+        return
+    kind, name = _category_from_callback(call, "pc")
+    bot.answer_callback_query(call.id)
+    if kind == "new":
+        ask_new_category(uid, "pin")
+    elif kind == "gone":
+        bot.send_message(uid, "That list expired - tap 📌 Pick a day & time again.")
+    else:
+        finish_pin(uid, name)
+
+
 # ---------------------------------------------------------------- /queue
 def send_queue_view(uid):
     counts = db.counts(uid)
@@ -996,13 +1113,14 @@ def days_keyboard(selected):
     return kb
 
 
-def time_keyboard(half=False):
+def time_keyboard(half=False, prefix="st"):
+    """prefix "st" = picking a weekly slot, "pt" = picking the time for one post."""
     kb = types.InlineKeyboardMarkup(row_width=4)
     minute = "30" if half else "00"
     hours = range(10, 22) if half else range(10, 23)        # 10:30-21:30 / 10:00-22:00
-    kb.add(*[btn(store_mod.fmt_time(f"{h:02d}:{minute}").replace(":00 ", " "), f"st:{h:02d}{minute}")
+    kb.add(*[btn(store_mod.fmt_time(f"{h:02d}:{minute}").replace(":00 ", " "), f"{prefix}:{h:02d}{minute}")
              for h in hours])
-    kb.row(btn("🕙 On the hour" if half else "🕧 Half-hours", "sth:00" if half else "sth:30"))
+    kb.row(btn("🕙 On the hour" if half else "🕧 Half-hours", f"{prefix[0]}th:00" if half else f"{prefix[0]}th:30"))
     return kb
 
 
